@@ -1,0 +1,19 @@
+# 派生物——ADR-0003 定其可随时删除重建，不进版本控制
+*.sqlite
+*.sqlite3
+*.db
+index/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# 环境配置（含数据根路径与模型 API key）
+.env
+.env.local
+
+# 数据仓库是兄弟目录，不在此仓库内——见 ADR-0005
+
+.DS_Store
