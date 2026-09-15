@@ -155,6 +155,21 @@ undici EnvHttpProxyAgent    ✓ 1.7s   200  361KB
 目前唯一可跑的是决策文档的校验脚本（来自 grill-with-docs 插件）：
 
 ```bash
+在 `code/` 根目录：
+
+```bash
+npm run dev          # 一条命令拉起前后端（server:3001 / client:5173）
+npm test             # 跑 server 全部测试
+npm run typecheck    # 两个 workspace 都检查
+npm run note -- "一句话"     # 记一条速记（不需要服务在跑，见 ADR-0009）
+npm run note -- --list       # 列出待归属的速记
+```
+
+跑单个测试文件：`cd server && node --import tsx --test src/quicknotes/append.test.ts`
+
+决策文档的校验脚本（来自 grill-with-docs 插件）：
+
+```bash
 S=~/.claude/plugins/cache/claude-code-skills/grill-with-docs/2.9.0/skills/grill-with-docs/scripts
 python3 $S/context_md_linter.py CONTEXT.md
 python3 $S/adr_scanner.py docs/adr/

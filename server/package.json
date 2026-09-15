@@ -6,7 +6,8 @@
     "dev": "tsx src/index.ts",
     "inbox": "tsx src/scripts/read-inbox.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test 'src/**/*.test.ts' 'src/*.test.ts'"
+    "test": "node --import tsx --test 'src/**/*.test.ts' 'src/*.test.ts'",
+    "note": "tsx src/scripts/note.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
