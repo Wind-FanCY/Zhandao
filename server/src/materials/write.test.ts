@@ -262,3 +262,27 @@ describe("writeMaterial", () => {
     assert.equal(content, content2);
   });
 });
+
+test("frontmatter 的 title 必须在一行内，且可被 grep 命中", async () => {
+  const dir = await mkdtemp(resolve(tmpdir(), "zhandao-grep-"));
+  process.env.ZHANDAO_DATA_DIR = dir;
+
+  const title = "45 道 Promise 面试题：手写实现与执行顺序";
+  const { path } = await writeMaterial({
+    title,
+    markdown: "# 正文\n\n内容",
+    source: "https://example.com/a",
+  });
+
+  const raw = await readFile(path, "utf8");
+
+  // lineWidth: 0 会把标题按空格拆成多行，grep 就找不到了（ADR-0003 要求可 grep）
+  assert.ok(
+    raw.includes(`title: ${title}`) || raw.includes(`title: "${title}"`) || raw.includes(`title: '${title}'`),
+    `标题应完整出现在一行内，实际 frontmatter:\n${raw.split("---")[1]}`,
+  );
+
+  // 逐行检查：必须有某一行同时包含标题的首尾片段
+  const line = raw.split("\n").find((l) => l.startsWith("title:"));
+  assert.ok(line?.includes("45 道 Promise") && line?.includes("执行顺序"), `title 行被截断: ${line}`);
+});

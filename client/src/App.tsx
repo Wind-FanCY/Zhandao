@@ -225,12 +225,23 @@ export function App() {
         body: JSON.stringify({
           url,
           title,
-          markdown: state.result.markdown,
         }),
       });
 
       if (!response.ok) {
         const data = await response.json();
+
+        // 处理 410 Gone：缓存已失效，需要重新抓取
+        if (response.status === 410) {
+          setError("提取的正文已过期，需要重新抓取。请点击「开始抓取」重新抓取此条目。");
+          setEntryStates((prev) => {
+            const updated = new Map(prev);
+            updated.set(url, { ...state, status: "待抓取" });
+            return updated;
+          });
+          return;
+        }
+
         setError(data.error || "Failed to keep entry");
         setEntryStates((prev) => {
           const updated = new Map(prev);

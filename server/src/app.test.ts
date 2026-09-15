@@ -280,7 +280,6 @@ describe("Express App Routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         url: "https://example.com/test",
-        markdown: "# Content",
       }),
     });
     assert.strictEqual(response.status, 400);
@@ -289,7 +288,7 @@ describe("Express App Routes", () => {
     assert.ok(data.error, "should have error message");
   });
 
-  test("POST /api/inbox/keep requires markdown", async () => {
+  test("POST /api/inbox/keep returns 410 when cache is missing", async () => {
     const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -298,22 +297,29 @@ describe("Express App Routes", () => {
         title: "Test Article",
       }),
     });
-    assert.strictEqual(response.status, 400);
+    assert.strictEqual(response.status, 410);
 
     const data = (await response.json()) as any;
     assert.ok(data.error, "should have error message");
+    assert.match(data.error, /cache|re-fetch|reprocess/i);
   });
 
   test("POST /api/inbox/keep returns 409 for duplicate URL", async () => {
+    // 导入 cacheExtraction 来预先设置缓存
+    const { cacheExtraction } = await import("./inbox/extract-cache.js");
+
     const url = "https://example.com/test";
     const title = "Test Article";
     const markdown = "# Content";
+
+    // 预先缓存正文
+    await cacheExtraction(url, markdown);
 
     // 第一次 keep
     const response1 = await fetch(`http://localhost:${port}/api/inbox/keep`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, title, markdown }),
+      body: JSON.stringify({ url, title }),
     });
     assert.strictEqual(response1.status, 201);
 
@@ -321,20 +327,25 @@ describe("Express App Routes", () => {
     const response2 = await fetch(`http://localhost:${port}/api/inbox/keep`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, title, markdown }),
+      body: JSON.stringify({ url, title }),
     });
     assert.strictEqual(response2.status, 409);
   });
 
-  test("POST /api/inbox/keep successfully writes material", async () => {
+  test("POST /api/inbox/keep successfully writes material when cache exists", async () => {
+    const { cacheExtraction } = await import("./inbox/extract-cache.js");
+
     const url = "https://example.com/test";
     const title = "Test Article";
     const markdown = "# Test Content\n\nSome text here.";
 
+    // 预先缓存正文
+    await cacheExtraction(url, markdown);
+
     const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, title, markdown }),
+      body: JSON.stringify({ url, title }),
     });
 
     assert.strictEqual(response.status, 201);
@@ -343,6 +354,30 @@ describe("Express App Routes", () => {
     assert.ok(data.id, "should return material id");
     assert.ok(data.path, "should return material path");
     assert.match(data.id, /^[A-Z0-9]{26}$/);
+  });
+
+  test("POST /api/inbox/keep works after job memory is cleared", async () => {
+    const { cacheExtraction } = await import("./inbox/extract-cache.js");
+
+    const url = "https://example.com/test-after-clear";
+    const title = "Test After Memory Clear";
+    const markdown = "# Content that survives memory clear";
+
+    // 缓存正文
+    await cacheExtraction(url, markdown);
+
+    // 不通过 fetch 获取结果，直接尝试 keep
+    // （模拟：用户读完文章、30 秒过去了、作业内存被清理了、用户点留下）
+    const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, title }),
+    });
+
+    // 即使作业已清理，由于正文在缓存里，keep 仍然成功
+    assert.strictEqual(response.status, 201);
+    const data = (await response.json()) as any;
+    assert.ok(data.id);
   });
 
   test("POST /api/inbox/drop requires URL", async () => {

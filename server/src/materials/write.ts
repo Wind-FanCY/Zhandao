@@ -80,7 +80,10 @@ export async function writeMaterial(m: NewMaterial): Promise<WrittenMaterial> {
 
   // 用 js-yaml 序列化 frontmatter
   const frontmatterStr = yamlDump(frontmatter, {
-    lineWidth: 0, // 不换行
+    // -1 才是「不限宽、不换行」；0 是「尽可能换行」，会把标题按空格拆成多行，
+    // 于是 `grep "Promise 面试题"` 找不到它——而 ADR-0003 把可 grep 列为
+    // 「文件是真相源」的收益之一。往返解析仍正确，但人和 grep 都读不了。
+    lineWidth: -1,
   });
 
   // 构建完整文件内容

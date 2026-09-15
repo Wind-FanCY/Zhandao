@@ -5,6 +5,7 @@ import { readInbox, InboxFolderNotFound } from "./inbox/chrome-bookmarks.js";
 import { extractArticles, type ExtractResult, type BatchItem } from "./inbox/extract.js";
 import { writeMaterial } from "./materials/write.js";
 import { appendProcessed, readProcessedUrls } from "./inbox/processed.js";
+import { cacheExtraction, readCachedExtraction } from "./inbox/extract-cache.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -166,6 +167,13 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
 
           if (item.result.ok) {
             succeeded += 1;
+
+            // 立刻将正文缓存到磁盘（不要等 30 秒清理）
+            cacheExtraction(item.url, item.result.markdown).catch((err) => {
+              // 缓存失败不应该影响用户界面，静默记录
+              console.error(`Failed to cache extraction for ${item.url}:`, err);
+            });
+
             // 发送成功结果，markdown 只传前 300 字
             const truncatedMarkdown = item.result.markdown.substring(0, 300);
             broadcastEvent(job, "item", {
@@ -289,15 +297,18 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
    * 将条目标记为"留下"并写入材料文件。
    *
    * Request body:
-   * { "url": "...", "title": "...", "markdown": "..." }
+   * { "url": "...", "title": "..." }
+   *
+   * 完整的正文从 .cache/ 读取。
    *
    * Response:
    * { "id": "...", "path": "..." } (201)
-   * { "error": "..." } (400/409/500)
+   * { "error": "..." } (400/409/410/500)
+   *   410: 缓存中找不到该 URL 的正文（需要重新抓取）
    */
   app.post("/api/inbox/keep", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { url, title, markdown } = req.body as Record<string, unknown>;
+      const { url, title } = req.body as Record<string, unknown>;
 
       // 验证必需字段
       if (!url || typeof url !== "string") {
@@ -308,33 +319,25 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
         return res.status(400).json({ error: "Missing or empty title" });
       }
 
-      if (!markdown || typeof markdown !== "string" || !markdown.trim()) {
-        return res.status(400).json({ error: "Missing or empty markdown" });
-      }
-
       // 检查该 URL 是否已处理
       const processedUrls = await readProcessedUrls();
       if (processedUrls.has(url)) {
         return res.status(409).json({ error: "URL already processed" });
       }
 
-      // 使用完整的 markdown（从内存中查找）
-      // 如果当前没有 job 或找不到该 URL 的结果，则直接使用传入的 markdown
-      let fullMarkdown = markdown;
-      if (currentJobId) {
-        const job = jobs.get(currentJobId);
-        if (job) {
-          const result = job.results.get(url);
-          if (result && result.ok) {
-            fullMarkdown = result.markdown;
-          }
-        }
+      // 从缓存读取完整的正文
+      // 410 Gone: 缓存资源不存在，需要重新抓取
+      const cachedMarkdown = await readCachedExtraction(url);
+      if (cachedMarkdown === null) {
+        return res.status(410).json({
+          error: "Extracted content not found in cache. Please re-fetch the article.",
+        });
       }
 
       // 写入材料文件
       const written = await writeMaterial({
         title: title.trim(),
-        markdown: fullMarkdown,
+        markdown: cachedMarkdown,
         source: url,
       });
 
