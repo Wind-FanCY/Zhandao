@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, describe, beforeEach, afterEach } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,11 +11,16 @@ describe("Express App Routes", () => {
   let bookmarksFile: string;
   let server: any;
   let port: number;
+  let dataDir: string;
 
   beforeEach(async () => {
     // 创建临时目录和书签文件
     tempDir = await mkdtemp(join(tmpdir(), "zhandao-test-"));
     bookmarksFile = join(tempDir, "Bookmarks");
+
+    // 创建数据目录用于测试
+    dataDir = await mkdtemp(join(tmpdir(), "zhandao-data-test-"));
+    process.env.ZHANDAO_DATA_DIR = dataDir;
 
     const testBookmarks = {
       roots: {
@@ -59,8 +64,15 @@ describe("Express App Routes", () => {
   });
 
   afterEach(async () => {
-    return new Promise<void>((resolve) => {
-      server.close(() => {
+    return new Promise<void>(async (resolve) => {
+      server.close(async () => {
+        // 清理数据目录
+        try {
+          await rm(dataDir, { recursive: true, force: true });
+        } catch {
+          // 忽略清理错误
+        }
+        delete process.env.ZHANDAO_DATA_DIR;
         resolve();
       });
     });
@@ -229,5 +241,153 @@ describe("Express App Routes", () => {
 
     const data = (await response.json()) as any;
     assert.ok(data.error, "should have error message");
+  });
+
+  test("GET /api/inbox includes filtered field", async () => {
+    const response = await fetch(`http://localhost:${port}/api/inbox`);
+    assert.strictEqual(response.status, 200);
+
+    const data = (await response.json()) as any;
+    assert.ok(typeof data.filtered === "number", "should have filtered field");
+  });
+
+  test("GET /api/inbox filters out processed URLs", async () => {
+    // 先读取所有条目
+    const response1 = await fetch(`http://localhost:${port}/api/inbox`);
+    const data1 = (await response1.json()) as any;
+    const initialCount = data1.entries.length;
+    assert.strictEqual(initialCount, 2);
+
+    // 标记一个 URL 为已处理
+    const urlToDrop = data1.entries[0].url;
+    const dropResponse = await fetch(`http://localhost:${port}/api/inbox/drop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: urlToDrop }),
+    });
+    assert.strictEqual(dropResponse.status, 200);
+
+    // 再次读取，应该少一条
+    const response2 = await fetch(`http://localhost:${port}/api/inbox`);
+    const data2 = (await response2.json()) as any;
+    assert.strictEqual(data2.entries.length, 1, "should have 1 entry after drop");
+    assert.strictEqual(data2.filtered, 1, "filtered should be 1");
+  });
+
+  test("POST /api/inbox/keep requires title", async () => {
+    const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: "https://example.com/test",
+        markdown: "# Content",
+      }),
+    });
+    assert.strictEqual(response.status, 400);
+
+    const data = (await response.json()) as any;
+    assert.ok(data.error, "should have error message");
+  });
+
+  test("POST /api/inbox/keep requires markdown", async () => {
+    const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: "https://example.com/test",
+        title: "Test Article",
+      }),
+    });
+    assert.strictEqual(response.status, 400);
+
+    const data = (await response.json()) as any;
+    assert.ok(data.error, "should have error message");
+  });
+
+  test("POST /api/inbox/keep returns 409 for duplicate URL", async () => {
+    const url = "https://example.com/test";
+    const title = "Test Article";
+    const markdown = "# Content";
+
+    // 第一次 keep
+    const response1 = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, title, markdown }),
+    });
+    assert.strictEqual(response1.status, 201);
+
+    // 第二次 keep 同一个 URL，应该返回 409
+    const response2 = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, title, markdown }),
+    });
+    assert.strictEqual(response2.status, 409);
+  });
+
+  test("POST /api/inbox/keep successfully writes material", async () => {
+    const url = "https://example.com/test";
+    const title = "Test Article";
+    const markdown = "# Test Content\n\nSome text here.";
+
+    const response = await fetch(`http://localhost:${port}/api/inbox/keep`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, title, markdown }),
+    });
+
+    assert.strictEqual(response.status, 201);
+    const data = (await response.json()) as any;
+
+    assert.ok(data.id, "should return material id");
+    assert.ok(data.path, "should return material path");
+    assert.match(data.id, /^[A-Z0-9]{26}$/);
+  });
+
+  test("POST /api/inbox/drop requires URL", async () => {
+    const response = await fetch(`http://localhost:${port}/api/inbox/drop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.strictEqual(response.status, 400);
+
+    const data = (await response.json()) as any;
+    assert.ok(data.error, "should have error message");
+  });
+
+  test("POST /api/inbox/drop returns 409 for duplicate URL", async () => {
+    const url = "https://example.com/test";
+
+    // 第一次 drop
+    const response1 = await fetch(`http://localhost:${port}/api/inbox/drop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    assert.strictEqual(response1.status, 200);
+
+    // 第二次 drop 同一个 URL，应该返回 409
+    const response2 = await fetch(`http://localhost:${port}/api/inbox/drop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    assert.strictEqual(response2.status, 409);
+  });
+
+  test("POST /api/inbox/drop successfully records decision", async () => {
+    const url = "https://example.com/test";
+
+    const response = await fetch(`http://localhost:${port}/api/inbox/drop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+
+    assert.strictEqual(response.status, 200);
+    const data = (await response.json()) as any;
+    assert.strictEqual(data.ok, true);
   });
 });

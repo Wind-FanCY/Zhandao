@@ -36,9 +36,10 @@ interface WireFailure {
 type WireResult = WireSuccess | WireFailure;
 
 interface EntryState {
-  status: "待抓取" | "抓取中" | "已就绪" | "失败";
+  status: "待抓取" | "抓取中" | "已就绪" | "失败" | "已留下" | "已划掉" | "处理中";
   result?: WireResult;
   expanded?: boolean;
+  editTitle?: string; // 编辑中的标题
 }
 
 interface InboxState {
@@ -204,6 +205,102 @@ export function App() {
     });
   };
 
+  // 保留条目
+  const handleKeep = async (url: string) => {
+    const state = entryStates.get(url);
+    if (!state || !state.result || !state.result.ok) return;
+
+    try {
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        updated.set(url, { ...state, status: "处理中" });
+        return updated;
+      });
+
+      const title = state.editTitle || state.result.title;
+
+      const response = await fetch("http://localhost:3001/api/inbox/keep", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          title,
+          markdown: state.result.markdown,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        setError(data.error || "Failed to keep entry");
+        setEntryStates((prev) => {
+          const updated = new Map(prev);
+          updated.set(url, { ...state, status: "已就绪" });
+          return updated;
+        });
+        return;
+      }
+
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        updated.set(url, { ...state, status: "已留下" });
+        return updated;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        updated.set(url, { ...state, status: "已就绪" });
+        return updated;
+      });
+    }
+  };
+
+  // 划掉条目
+  const handleDrop = async (url: string) => {
+    const state = entryStates.get(url);
+    if (!state) return;
+
+    try {
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        updated.set(url, { ...state, status: "处理中" });
+        return updated;
+      });
+
+      const response = await fetch("http://localhost:3001/api/inbox/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        setError(data.error || "Failed to drop entry");
+        setEntryStates((prev) => {
+          const updated = new Map(prev);
+          const currentState = updated.get(url) || state;
+          updated.set(url, { ...currentState, status: state.status });
+          return updated;
+        });
+        return;
+      }
+
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        updated.set(url, { ...state, status: "已划掉" });
+        return updated;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+      setEntryStates((prev) => {
+        const updated = new Map(prev);
+        const currentState = updated.get(url) || state;
+        updated.set(url, { ...currentState, status: state.status });
+        return updated;
+      });
+    }
+  };
+
   if (loading) {
     return <div style={{ padding: "20px" }}>加载中...</div>;
   }
@@ -283,6 +380,9 @@ export function App() {
                 抓取中: "#ff9800",
                 已就绪: "#4caf50",
                 失败: "#f44336",
+                已留下: "#4caf50",
+                已划掉: "#999",
+                处理中: "#ff9800",
               }[state.status];
 
               return (
@@ -302,25 +402,83 @@ export function App() {
                     <td style={{ padding: "10px", verticalAlign: "middle" }}>
                       <span style={{ color: statusColor, fontWeight: "bold", fontSize: "14px" }}>{state.status}</span>
                       {state.status === "已就绪" && state.result && (
-                        <button
-                          onClick={() => toggleExpanded(entry.url)}
-                          style={{
-                            marginLeft: "8px",
-                            padding: "4px 8px",
-                            backgroundColor: "#e8f5e9",
-                            border: "1px solid #4caf50",
-                            borderRadius: "4px",
-                            cursor: "pointer",
-                            fontSize: "12px",
-                          }}
-                        >
-                          {state.expanded ? "收起" : "展开"}
-                        </button>
+                        <>
+                          <button
+                            onClick={() => toggleExpanded(entry.url)}
+                            style={{
+                              marginLeft: "8px",
+                              padding: "4px 8px",
+                              backgroundColor: "#e8f5e9",
+                              border: "1px solid #4caf50",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "12px",
+                            }}
+                          >
+                            {state.expanded ? "收起" : "展开"}
+                          </button>
+                          <button
+                            onClick={() => handleKeep(entry.url)}
+                            style={{
+                              marginLeft: "8px",
+                              padding: "4px 8px",
+                              backgroundColor: "#4caf50",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "12px",
+                            }}
+                          >
+                            留下
+                          </button>
+                          <button
+                            onClick={() => handleDrop(entry.url)}
+                            style={{
+                              marginLeft: "4px",
+                              padding: "4px 8px",
+                              backgroundColor: "#f44336",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "12px",
+                            }}
+                          >
+                            划掉
+                          </button>
+                        </>
                       )}
                       {state.status === "失败" && state.result && !state.result.ok && (
-                        <div style={{ marginLeft: "8px", fontSize: "12px", color: "#f44336" }}>
-                          {state.result.reason} {state.result.transient ? "(临时失败)" : "(永久失败)"}
-                        </div>
+                        <>
+                          <div style={{ marginLeft: "8px", fontSize: "12px", color: "#f44336", marginBottom: "8px" }}>
+                            {state.result.reason} {state.result.transient ? "(临时失败)" : "(永久失败)"}
+                          </div>
+                          <button
+                            onClick={() => handleDrop(entry.url)}
+                            style={{
+                              marginLeft: "8px",
+                              padding: "4px 8px",
+                              backgroundColor: "#f44336",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "12px",
+                            }}
+                          >
+                            划掉
+                          </button>
+                        </>
+                      )}
+                      {state.status === "已留下" && (
+                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#4caf50" }}>✓ 已留下</span>
+                      )}
+                      {state.status === "已划掉" && (
+                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#999" }}>✓ 已划掉</span>
+                      )}
+                      {state.status === "处理中" && (
+                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#ff9800" }}>处理中...</span>
                       )}
                     </td>
                   </tr>
@@ -330,6 +488,31 @@ export function App() {
                       <td colSpan={4} style={{ padding: "15px" }}>
                         <div>
                           <strong>抽取标题：</strong> {state.result.title}
+                        </div>
+                        <div style={{ marginTop: "10px" }}>
+                          <strong>编辑标题：</strong>
+                          <input
+                            type="text"
+                            value={state.editTitle ?? state.result.title}
+                            onChange={(e) => {
+                              setEntryStates((prev) => {
+                                const updated = new Map(prev);
+                                const currentState = updated.get(entry.url) || state;
+                                updated.set(entry.url, {
+                                  ...currentState,
+                                  editTitle: e.target.value,
+                                });
+                                return updated;
+                              });
+                            }}
+                            style={{
+                              marginLeft: "8px",
+                              padding: "6px",
+                              width: "300px",
+                              borderRadius: "4px",
+                              border: "1px solid #ddd",
+                            }}
+                          />
                         </div>
                         <div style={{ marginTop: "10px" }}>
                           <strong>字数：</strong> {state.result.textLength}
@@ -351,6 +534,38 @@ export function App() {
                           >
                             {state.result.markdown}
                           </pre>
+                        </div>
+                        <div style={{ marginTop: "15px", display: "flex", gap: "8px" }}>
+                          <button
+                            onClick={() => handleKeep(entry.url)}
+                            disabled={state.status !== "已就绪"}
+                            style={{
+                              padding: "8px 16px",
+                              backgroundColor: "#4caf50",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: state.status !== "已就绪" ? "not-allowed" : "pointer",
+                              fontSize: "14px",
+                            }}
+                          >
+                            留下
+                          </button>
+                          <button
+                            onClick={() => handleDrop(entry.url)}
+                            disabled={state.status !== "已就绪"}
+                            style={{
+                              padding: "8px 16px",
+                              backgroundColor: "#f44336",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: state.status !== "已就绪" ? "not-allowed" : "pointer",
+                              fontSize: "14px",
+                            }}
+                          >
+                            划掉
+                          </button>
                         </div>
                       </td>
                     </tr>

@@ -3,6 +3,8 @@ import type { Express, Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { readInbox, InboxFolderNotFound } from "./inbox/chrome-bookmarks.js";
 import { extractArticles, type ExtractResult, type BatchItem } from "./inbox/extract.js";
+import { writeMaterial } from "./materials/write.js";
+import { appendProcessed, readProcessedUrls } from "./inbox/processed.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -81,14 +83,23 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
 
   /**
    * GET /api/inbox
-   * 立即返回本地收件箱条目，不做任何抓取。
+   * 立即返回本地收件箱条目，过滤掉已处理的 URL。
    */
   app.get("/api/inbox", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await readInbox(inboxBookmarksPath);
+      const [inboxResult, processedUrls] = await Promise.all([
+        readInbox(inboxBookmarksPath),
+        readProcessedUrls(),
+      ]);
+
+      // 过滤掉已处理的 URL
+      const filtered = inboxResult.entries.filter((entry) => !processedUrls.has(entry.url));
+      const filteredCount = inboxResult.entries.length - filtered.length;
+
       res.json({
-        entries: result.entries,
-        matchedFolders: result.matchedFolders,
+        entries: filtered,
+        matchedFolders: inboxResult.matchedFolders,
+        filtered: filteredCount,
       });
     } catch (err) {
       if (err instanceof InboxFolderNotFound) {
@@ -271,6 +282,118 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
         job.listeners.splice(idx, 1);
       }
     });
+  });
+
+  /**
+   * POST /api/inbox/keep
+   * 将条目标记为"留下"并写入材料文件。
+   *
+   * Request body:
+   * { "url": "...", "title": "...", "markdown": "..." }
+   *
+   * Response:
+   * { "id": "...", "path": "..." } (201)
+   * { "error": "..." } (400/409/500)
+   */
+  app.post("/api/inbox/keep", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { url, title, markdown } = req.body as Record<string, unknown>;
+
+      // 验证必需字段
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ error: "Missing or invalid url" });
+      }
+
+      if (!title || typeof title !== "string" || !title.trim()) {
+        return res.status(400).json({ error: "Missing or empty title" });
+      }
+
+      if (!markdown || typeof markdown !== "string" || !markdown.trim()) {
+        return res.status(400).json({ error: "Missing or empty markdown" });
+      }
+
+      // 检查该 URL 是否已处理
+      const processedUrls = await readProcessedUrls();
+      if (processedUrls.has(url)) {
+        return res.status(409).json({ error: "URL already processed" });
+      }
+
+      // 使用完整的 markdown（从内存中查找）
+      // 如果当前没有 job 或找不到该 URL 的结果，则直接使用传入的 markdown
+      let fullMarkdown = markdown;
+      if (currentJobId) {
+        const job = jobs.get(currentJobId);
+        if (job) {
+          const result = job.results.get(url);
+          if (result && result.ok) {
+            fullMarkdown = result.markdown;
+          }
+        }
+      }
+
+      // 写入材料文件
+      const written = await writeMaterial({
+        title: title.trim(),
+        markdown: fullMarkdown,
+        source: url,
+      });
+
+      // 记录为已处理
+      await appendProcessed({
+        url,
+        decision: "kept",
+        at: new Date().toISOString(),
+        materialId: written.id,
+      });
+
+      return res.status(201).json({
+        id: written.id,
+        path: written.path,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/inbox/drop
+   * 将条目标记为"划掉"。
+   *
+   * Request body:
+   * { "url": "..." }
+   *
+   * Response:
+   * { "ok": true } (200)
+   * { "error": "..." } (400/409/500)
+   */
+  app.post("/api/inbox/drop", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { url } = req.body as Record<string, unknown>;
+
+      // 验证必需字段
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ error: "Missing or invalid url" });
+      }
+
+      // 检查该 URL 是否已处理
+      const processedUrls = await readProcessedUrls();
+      if (processedUrls.has(url)) {
+        return res.status(409).json({ error: "URL already processed" });
+      }
+
+      // 记录为已处理
+      await appendProcessed({
+        url,
+        decision: "dropped",
+        at: new Date().toISOString(),
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
   });
 
   return app;
