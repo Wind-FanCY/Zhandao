@@ -8,8 +8,15 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.10.7",
+    "@types/turndown": "^5.0.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^30.0.1",
+    "turndown": "^7.2.4"
   }
 }
