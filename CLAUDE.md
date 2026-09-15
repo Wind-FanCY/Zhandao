@@ -123,5 +123,5 @@ python3 $S/glossary_code_consistency.py --context CONTEXT.md --code src/
 - **切块粒度**：块多大、是否重叠
 - **评估集**怎么建、用什么指标
 - **embedding 模型选型**：到阶段 4 再查当时现状，不要凭记忆选型号
-- **备份策略**：两个仓库都已 `git init`，但**同一块磁盘上的 git 不是备份**。**标注**不可再生，需要异地副本（私有远端或外部介质），方案未定
+- ~~**备份策略**~~ **已解决**：`data/` 推送至私有远端 `github.com/Wind-FanCY/Zhandao-data`，异地 + 有版本史。残余风险仅为 GitHub 账号丢失
 - **图谱的折叠 / 过滤策略**（ADR-0001 已预告需要）
