@@ -174,4 +174,6 @@ python3 $S/glossary_code_consistency.py --context CONTEXT.md --code src/
 - ~~**备份策略**~~ **已解决**：`data/` 推送至私有远端 `github.com/Wind-FanCY/Zhandao-data`，异地 + 有版本史。残余风险仅为 GitHub 账号丢失
 - **URL 规范化**：已处理清单按 URL 过滤，追踪参数 / 短链 / 镜像站会被当成新条目（ADR-0008）
 - **抓取限流**：掘金等站点会在连续请求后返回空壳页，表现为 `too_short`，与「页面是 JS 渲染」不可区分
+- **本机代理未启动**：代理是本机进程（127.0.0.1:7897），它没开时抓取失败会被判为
+  `network / transient` 重试三次，与「网站挂了」不可区分。需要一个能区分两者的信号
 - **图谱的折叠 / 过滤策略**（ADR-0001 已预告需要）

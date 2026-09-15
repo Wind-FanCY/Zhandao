@@ -1,7 +1,10 @@
 /**
  * 运行时初始化：处理代理和其他全局设置。
  *
- * 本地开发通常通过 http_proxy 环境变量走企业代理。Node 的 fetch（undici）默认不读该变量。
+ * 本机出网走一个本地代理（http_proxy=http://127.0.0.1:7897），而非企业出口代理——
+ * 区别要紧：本地代理是一个自己跑的进程，它可能没开。
+ * 而 http_proxy 只是 Unix 世界的民间约定，不是系统设置：curl / git / npm 都读它，
+ * Node 的 fetch（undici）默认不读。这是 undici 的明确立场，不是缺陷。
  * 改用显式的 setGlobalDispatcher(new EnvHttpProxyAgent()) 的原因：
  *
  * 1. 有多条启动路径（dev server、launchd 脚本、测试），环境变量易被忽略。
