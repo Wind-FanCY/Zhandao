@@ -105,13 +105,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   同一次过闸内的退避重试不落盘、不跨会话、随过闸结束消失，因此不构成堆积，不违反本条。
 - PDF 第一版不支持，直接当失败处理。攒够几篇再决定是否上解析，现在做是猜需求。
 
+**代理（实测过，别删）**：本机把出网流量走本地代理（`http_proxy=http://127.0.0.1:7897`）。
+`curl` 认这个环境变量，**Node 的 fetch（undici）不认** —— 于是需要代理的站点全部
+`UND_ERR_CONNECT_TIMEOUT`，10 秒超时后还会被当成临时失败重试 3 次，白烧 30 秒。
+
+实测数据：
+
+```
+不带处理                    ✗ 10.5s  UND_ERR_CONNECT_TIMEOUT
+NODE_USE_ENV_PROXY=1        ✓ 1.8s   200  361KB
+undici EnvHttpProxyAgent    ✓ 1.7s   200  361KB
+```
+
+选用**代码内 `setGlobalDispatcher(new EnvHttpProxyAgent())`**，不用环境变量：launchd 定时脚本
+（ADR-0004）和测试是另外两条启动路径，环境变量会被忘，而失效是静默的——表现为
+「这篇抓不到」，容易误判成网站的问题。`undici` 必须是显式依赖，不能依赖它作为传递依赖存在。
+
 过闸界面：
 
 - **进页面立刻显示书签标题列表**（数据已在本地，零延迟），抓取在后台顺序进行，
   抓好的条目逐个变成可判断状态。**不要做「等全部抓完再显示」**——顺序抓 + 1.5 秒间隔下，
   40 条要等一分钟以上，而白屏是最好的劝退手段，直接违反 ADR-0002 的启动摩擦约束。
 - 这样等待被阅读时间吸收：处理第一条要十几秒，足够后面两三条抓完。
-- 因此后端必须暴露抓取进度，前端订阅它。`extractArticles` 的 `onProgress` 回调即为此准备。
+- 因此后端必须暴露抓取进度，前端订阅它。
+- **逐条结果必须逐条推送。** `onProgress(done, total, url)` 只报进度、不带结果，
+  服务端因此在整批跑完前拿不到任何单条结果，`item` 事件只能在最后一起发——
+  界面上就是多条同时卡在「抓取中」，「抓好的逐个变成可判断状态」并未实现。
+  所以 `extractArticles` 必须提供 `onItem(item)` 回调。
+- **SSE 的 `item` 载荷不等于内部的 `ExtractResult`**（正文只传前 300 字，不传全文）。
+  前端应当声明自己的 wire 类型并按 `ok` 字段收窄，**不要用 `as any` 绕过判别联合**。
 
 ## 功能优先级
 
