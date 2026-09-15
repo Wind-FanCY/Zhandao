@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**尚无代码。** 仓库里目前只有决策记录：`CONTEXT.md`（术语表）和 `docs/adr/`（7 条 ADR）。
+决策记录：`CONTEXT.md`（术语表）与 `docs/adr/`（8 条 ADR）。代码在 `server/`，
+已完成收录链路前两步：读 Chrome 书签收件箱、抓取并抽取正文。
 
 目录布局：`Zhandao/` 是容器（非仓库），其下 `code/`（本仓库）与 `data/`（材料与标注，独立私有仓库）平级——见 ADR-0005。
 
@@ -51,6 +52,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 不要写数据库迁移脚本。schema 变了就删库重建 | ADR-0003 |
 | 复习调度依据答题表现。不要实现艾宾浩斯 / SM-2 之类的通用间隔算法 | ADR-0004 |
 | 定时触发用 launchd，不要起常驻进程 | ADR-0004 |
+| **不要写 Chrome 的书签文件**（有 checksum、在云端同步、被 Chrome 进程持有）。已处理条目靠 `data/` 里的清单过滤 | ADR-0008 |
 
 ## 技术路线
 
@@ -67,7 +69,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   4. 加向量，做混合检索 + RRF，重测
 
   跳过第 2 步就失去了判断后续改动是否有效的能力，那是这套流程里最值钱的一步。
-  上向量的具体理由是**跨语言检索**：材料多为英文，标注为中文，BM25 在这两者之间字面零重合。
+  **注意，一个已被推翻的论据**：曾以「跨语言检索」作为上向量的理由（材料英文、标注中文），
+  但首批真实材料全为中文（掘金、小林 coding），该理由不成立。向量仍可能有价值
+  （同义表述、概念相近搜不到），但到阶段 4 必须用评估集实测，不要沿用这个旧论据。
 - **切块**：材料按标题层级切，标注一条一块。**标注必须与其附着的材料块一同进入检索结果**——问答时要同时拿到"原文说什么"和"本人当时想什么"。
 - **图谱**：目标是**找孤岛**（没有任何标注指向、也没发出过标注的材料 = 存了但从没消化的），不是展示。
 
@@ -124,4 +128,6 @@ python3 $S/glossary_code_consistency.py --context CONTEXT.md --code src/
 - **评估集**怎么建、用什么指标
 - **embedding 模型选型**：到阶段 4 再查当时现状，不要凭记忆选型号
 - ~~**备份策略**~~ **已解决**：`data/` 推送至私有远端 `github.com/Wind-FanCY/Zhandao-data`，异地 + 有版本史。残余风险仅为 GitHub 账号丢失
+- **URL 规范化**：已处理清单按 URL 过滤，追踪参数 / 短链 / 镜像站会被当成新条目（ADR-0008）
+- **抓取限流**：掘金等站点会在连续请求后返回空壳页，表现为 `too_short`，与「页面是 JS 渲染」不可区分
 - **图谱的折叠 / 过滤策略**（ADR-0001 已预告需要）
