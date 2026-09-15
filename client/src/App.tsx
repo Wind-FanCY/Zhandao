@@ -374,218 +374,232 @@ export function App() {
 
       <div style={{ marginTop: "20px" }}>
         <h2>条目列表</h2>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "2px solid #ddd" }}>
-              <th style={{ textAlign: "left", padding: "10px", fontWeight: "bold" }}>书签标题</th>
-              <th style={{ textAlign: "left", padding: "10px", fontWeight: "bold" }}>URL</th>
-              <th style={{ textAlign: "left", padding: "10px", fontWeight: "bold" }}>添加日期</th>
-              <th style={{ textAlign: "left", padding: "10px", fontWeight: "bold" }}>状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inbox.entries.map((entry) => {
-              const state = entryStates.get(entry.url) || { status: "待抓取" as const };
-              const statusColor = {
-                待抓取: "#999",
-                抓取中: "#ff9800",
-                已就绪: "#4caf50",
-                失败: "#f44336",
-                已留下: "#4caf50",
-                已划掉: "#999",
-                处理中: "#ff9800",
-              }[state.status];
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {inbox.entries.map((entry) => {
+            const state = entryStates.get(entry.url) || { status: "待抓取" as const };
+            const statusColor = {
+              待抓取: "#999",
+              抓取中: "#ff9800",
+              已就绪: "#4caf50",
+              失败: "#f44336",
+              已留下: "#4caf50",
+              已划掉: "#999",
+              处理中: "#ff9800",
+            }[state.status];
 
-              return (
-                <>
-                  <tr style={{ borderBottom: "1px solid #eee" }}>
-                    <td style={{ padding: "10px", verticalAlign: "middle" }}>
-                      <div style={{ maxWidth: "300px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.title}</div>
-                    </td>
-                    <td style={{ padding: "10px", verticalAlign: "middle" }}>
-                      <a href={entry.url} target="_blank" rel="noopener noreferrer" style={{ color: "#007bff", textDecoration: "none", fontSize: "12px" }}>
-                        {new URL(entry.url).hostname}
-                      </a>
-                    </td>
-                    <td style={{ padding: "10px", verticalAlign: "middle", fontSize: "12px" }}>
-                      {entry.addedAt ? new Date(entry.addedAt).toLocaleDateString("zh-Hans") : "-"}
-                    </td>
-                    <td style={{ padding: "10px", verticalAlign: "middle" }}>
-                      <span style={{ color: statusColor, fontWeight: "bold", fontSize: "14px" }}>{state.status}</span>
-                      {state.status === "已就绪" && state.result && (
-                        <>
-                          <button
-                            onClick={() => toggleExpanded(entry.url)}
-                            style={{
-                              marginLeft: "8px",
-                              padding: "4px 8px",
-                              backgroundColor: "#e8f5e9",
-                              border: "1px solid #4caf50",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            {state.expanded ? "收起" : "展开"}
-                          </button>
-                          <button
-                            onClick={() => handleKeep(entry.url)}
-                            style={{
-                              marginLeft: "8px",
-                              padding: "4px 8px",
-                              backgroundColor: "#4caf50",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            留下
-                          </button>
-                          <button
-                            onClick={() => handleDrop(entry.url)}
-                            style={{
-                              marginLeft: "4px",
-                              padding: "4px 8px",
-                              backgroundColor: "#f44336",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            划掉
-                          </button>
-                        </>
-                      )}
-                      {state.status === "失败" && state.result && !state.result.ok && (
-                        <>
-                          <div style={{ marginLeft: "8px", fontSize: "12px", color: "#f44336", marginBottom: "8px" }}>
-                            {state.result.reason} {state.result.transient ? "(临时失败)" : "(永久失败)"}
-                          </div>
-                          <button
-                            onClick={() => handleDrop(entry.url)}
-                            style={{
-                              marginLeft: "8px",
-                              padding: "4px 8px",
-                              backgroundColor: "#f44336",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            划掉
-                          </button>
-                        </>
-                      )}
-                      {state.status === "已留下" && (
-                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#4caf50" }}>✓ 已留下</span>
-                      )}
-                      {state.status === "已划掉" && (
-                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#999" }}>✓ 已划掉</span>
-                      )}
-                      {state.status === "处理中" && (
-                        <span style={{ marginLeft: "8px", fontSize: "12px", color: "#ff9800" }}>处理中...</span>
-                      )}
-                    </td>
-                  </tr>
+            const hostname = new URL(entry.url).hostname;
+            const dateStr = entry.addedAt ? new Date(entry.addedAt).toLocaleDateString("zh-Hans") : "-";
 
-                  {state.status === "已就绪" && state.expanded && state.result && state.result.ok && (
-                    <tr style={{ backgroundColor: "#f9f9f9" }}>
-                      <td colSpan={4} style={{ padding: "15px" }}>
-                        <div>
-                          <strong>抽取标题：</strong> {state.result.title}
+            return (
+              <div
+                key={entry.url}
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: "6px",
+                  overflow: "hidden",
+                  backgroundColor: "white",
+                }}
+              >
+                {/* 第一行：标题和操作按钮 */}
+                {(state.status === "待抓取" || state.status === "抓取中" || state.status === "处理中") && (
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "14px", color: "#333", wordBreak: "break-word" }}>
+                          {entry.title}
                         </div>
-                        <div style={{ marginTop: "10px" }}>
-                          <strong>编辑标题：</strong>
-                          <input
-                            type="text"
-                            value={state.editTitle ?? state.result.title}
-                            onChange={(e) => {
-                              setEntryStates((prev) => {
-                                const updated = new Map(prev);
-                                const currentState = updated.get(entry.url) || state;
-                                updated.set(entry.url, {
-                                  ...currentState,
-                                  editTitle: e.target.value,
-                                });
-                                return updated;
-                              });
-                            }}
-                            style={{
-                              marginLeft: "8px",
-                              padding: "6px",
-                              width: "300px",
-                              borderRadius: "4px",
-                              border: "1px solid #ddd",
-                            }}
-                          />
+                      </div>
+                      <span style={{ color: statusColor, fontWeight: "bold", fontSize: "12px", whiteSpace: "nowrap" }}>
+                        {state.status}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {state.status === "已就绪" && state.result && state.result.ok && (
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <input
+                        type="text"
+                        value={state.editTitle ?? state.result.title}
+                        onChange={(e) => {
+                          setEntryStates((prev) => {
+                            const updated = new Map(prev);
+                            const currentState = updated.get(entry.url) || state;
+                            updated.set(entry.url, {
+                              ...currentState,
+                              editTitle: e.target.value,
+                            });
+                            return updated;
+                          });
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          padding: "8px",
+                          borderRadius: "4px",
+                          border: "1px solid #ddd",
+                          fontSize: "14px",
+                        }}
+                      />
+                      <button
+                        onClick={() => handleKeep(entry.url)}
+                        disabled={state.status !== "已就绪"}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#4caf50",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        留下
+                      </button>
+                      <button
+                        onClick={() => handleDrop(entry.url)}
+                        disabled={state.status !== "已就绪"}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#f44336",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        划掉
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {state.status === "失败" && state.result && !state.result.ok && (
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "14px", color: "#333", wordBreak: "break-word" }}>
+                          {entry.title}
                         </div>
-                        <div style={{ marginTop: "10px" }}>
-                          <strong>字数：</strong> {state.result.textLength}
+                      </div>
+                      <button
+                        onClick={() => handleDrop(entry.url)}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#f44336",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        划掉
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {(state.status === "已留下" || state.status === "已划掉") && (
+                  <div style={{ padding: "12px 16px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: "14px", color: "#333", wordBreak: "break-word" }}>
+                          {entry.title}
                         </div>
-                        <div style={{ marginTop: "10px" }}>
-                          <strong>正文开头：</strong>
-                          <pre
-                            style={{
-                              backgroundColor: "#f5f5f5",
-                              padding: "10px",
-                              borderRadius: "4px",
-                              maxHeight: "200px",
-                              overflow: "auto",
-                              marginTop: "5px",
-                              fontSize: "12px",
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                            }}
-                          >
-                            {state.result.markdown}
-                          </pre>
-                        </div>
-                        <div style={{ marginTop: "15px", display: "flex", gap: "8px" }}>
-                          <button
-                            onClick={() => handleKeep(entry.url)}
-                            disabled={state.status !== "已就绪"}
-                            style={{
-                              padding: "8px 16px",
-                              backgroundColor: "#4caf50",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: state.status !== "已就绪" ? "not-allowed" : "pointer",
-                              fontSize: "14px",
-                            }}
-                          >
-                            留下
-                          </button>
-                          <button
-                            onClick={() => handleDrop(entry.url)}
-                            disabled={state.status !== "已就绪"}
-                            style={{
-                              padding: "8px 16px",
-                              backgroundColor: "#f44336",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: state.status !== "已就绪" ? "not-allowed" : "pointer",
-                              fontSize: "14px",
-                            }}
-                          >
-                            划掉
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                      </div>
+                      <span style={{ color: statusColor, fontWeight: "bold", fontSize: "12px", whiteSpace: "nowrap" }}>
+                        {state.status === "已留下" ? "✓ 已留下" : "✓ 已划掉"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 第二行：元数据和展开按钮 */}
+                <div style={{ padding: "8px 16px", display: "flex", alignItems: "center", gap: "12px", fontSize: "12px", color: "#666" }}>
+                  <a
+                    href={entry.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#007bff", textDecoration: "none", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={entry.url}
+                  >
+                    {hostname}
+                  </a>
+                  <span style={{ whiteSpace: "nowrap" }}>{dateStr}</span>
+                  {state.status === "失败" && state.result && !state.result.ok && (
+                    <span style={{ color: "#f44336", whiteSpace: "nowrap" }}>
+                      {state.result.reason} {state.result.transient ? "(临时)" : "(永久)"}
+                    </span>
                   )}
-                </>
-              );
-            })}
-          </tbody>
-        </table>
+                  {state.status === "已就绪" && state.result && state.result.ok && (
+                    <button
+                      onClick={() => toggleExpanded(entry.url)}
+                      style={{
+                        padding: "4px 8px",
+                        backgroundColor: "#f0f0f0",
+                        border: "1px solid #ddd",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {state.expanded ? "收起" : "展开"}
+                    </button>
+                  )}
+                </div>
+
+                {/* 展开面板：深入内容 */}
+                {state.status === "已就绪" && state.expanded && state.result && state.result.ok && (
+                  <div style={{ padding: "12px 16px", backgroundColor: "#f9f9f9", borderTop: "1px solid #f0f0f0" }}>
+                    <div style={{ marginBottom: "12px" }}>
+                      <strong style={{ fontSize: "12px", color: "#666" }}>抽取标题：</strong>
+                      <div style={{ fontSize: "13px", marginTop: "4px", color: "#333" }}>{state.result.title}</div>
+                    </div>
+                    <div style={{ marginBottom: "12px" }}>
+                      <strong style={{ fontSize: "12px", color: "#666" }}>字数：</strong>
+                      <div style={{ fontSize: "13px", marginTop: "4px", color: "#333" }}>{state.result.textLength}</div>
+                    </div>
+                    <div style={{ marginBottom: "12px" }}>
+                      <strong style={{ fontSize: "12px", color: "#666" }}>最终 URL：</strong>
+                      <div style={{ fontSize: "12px", marginTop: "4px", color: "#007bff", wordBreak: "break-all" }}>
+                        <a href={state.result.finalUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#007bff", textDecoration: "none" }}>
+                          {state.result.finalUrl}
+                        </a>
+                      </div>
+                    </div>
+                    <div>
+                      <strong style={{ fontSize: "12px", color: "#666" }}>正文开头：</strong>
+                      <pre
+                        style={{
+                          backgroundColor: "#fff",
+                          padding: "8px",
+                          borderRadius: "4px",
+                          border: "1px solid #e0e0e0",
+                          maxHeight: "200px",
+                          overflow: "auto",
+                          marginTop: "4px",
+                          fontSize: "12px",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          color: "#333",
+                        }}
+                      >
+                        {state.result.markdown}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
