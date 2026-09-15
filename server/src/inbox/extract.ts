@@ -18,6 +18,10 @@ export type ExtractFailure = {
   ok: false;
   reason: "not_html" | "http_error" | "network" | "timeout" | "no_content" | "too_short";
   detail: string;
+  /** 是否值得重试。分类规则见下表，不要自己发挥。 */
+  transient: boolean;
+  /** 仅 reason === "http_error" 时存在 */
+  status?: number;
 };
 
 export type ExtractResult = ExtractSuccess | ExtractFailure;
@@ -123,36 +127,48 @@ export async function extractArticle(
   try {
     let response: Response;
     try {
+      // 从 URL 提取 origin 作为 Referer
+      const refererOrigin = new URL(url).origin;
       response = await fetch(url, {
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { "User-Agent": USER_AGENT },
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+          "Referer": refererOrigin,
+        },
       });
     } catch (err) {
       const errName = (err as Error)?.name ?? "";
       // AbortSignal.timeout() 抛出 DOMException("TimeoutError")，而其他 abort 抛出 "AbortError"
       if (errName === "TimeoutError") {
-        return { ok: false, reason: "timeout", detail: `Request timeout after ${timeoutMs}ms` };
+        return { ok: false, reason: "timeout", detail: `Request timeout after ${timeoutMs}ms`, transient: true };
       }
       return {
         ok: false,
         reason: "network",
         detail: `Network error: ${(err as Error).message}`,
+        transient: true,
       };
     }
 
     // 处理 HTTP 错误
     if (!response.ok) {
+      const status = response.status;
+      const transient = status >= 500 || status === 429;
       return {
         ok: false,
         reason: "http_error",
-        detail: `HTTP ${response.status}`,
+        detail: `HTTP ${status}`,
+        transient,
+        status,
       };
     }
 
     // 检查 Content-Type，拒绝 PDF 和非 HTML/XHTML
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/pdf")) {
-      return { ok: false, reason: "not_html", detail: "Content-Type is application/pdf" };
+      return { ok: false, reason: "not_html", detail: "Content-Type is application/pdf", transient: false };
     }
     const isHtml =
       contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
@@ -161,6 +177,7 @@ export async function extractArticle(
         ok: false,
         reason: "not_html",
         detail: `Content-Type is ${contentType || "unknown"}`,
+        transient: false,
       };
     }
 
@@ -173,6 +190,7 @@ export async function extractArticle(
         ok: false,
         reason: "network",
         detail: `Failed to read response body: ${(err as Error).message}`,
+        transient: true,
       };
     }
 
@@ -196,11 +214,12 @@ export async function extractArticle(
         ok: false,
         reason: "no_content",
         detail: `Failed to parse HTML: ${(err as Error).message}`,
+        transient: false,
       };
     }
 
     if (!article) {
-      return { ok: false, reason: "no_content", detail: "Readability returned null" };
+      return { ok: false, reason: "no_content", detail: "Readability returned null", transient: false };
     }
 
     // 用 turndown 转成 Markdown
@@ -217,6 +236,7 @@ export async function extractArticle(
         ok: false,
         reason: "no_content",
         detail: `Failed to convert to Markdown: ${(err as Error).message}`,
+        transient: false,
       };
     }
 
@@ -227,6 +247,7 @@ export async function extractArticle(
         ok: false,
         reason: "too_short",
         detail: `Text length ${textLength} < ${minTextLength}`,
+        transient: true,
       };
     }
 
@@ -249,6 +270,93 @@ export async function extractArticle(
       ok: false,
       reason: "no_content",
       detail: `Unexpected error: ${(err as Error).message}`,
+      transient: false,
     };
   }
+}
+
+export type BatchOptions = {
+  /** 单个 URL 的抽取超时，透传给 extractArticle */
+  timeoutMs?: number;
+  minTextLength?: number;
+  /** 不同 URL 之间的间隔，默认 1500 */
+  delayMs?: number;
+  /** 单个 URL 的最大重试次数（不含首次），默认 2 */
+  maxRetries?: number;
+  /** 每次重试前的等待时长，默认 [2000, 5000]，按重试序号取用 */
+  backoffMs?: number[];
+  /** 进度回调，便于 UI 显示 */
+  onProgress?: (done: number, total: number, url: string) => void;
+  /** 可注入的 sleep 函数，用于测试。默认使用真实的 setTimeout */
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export type BatchItem = { url: string; result: ExtractResult; attempts: number };
+
+/**
+ * 批量抽取多个 URL 的正文。
+ *
+ * 行为要求：
+ * 1. 严格顺序，不并发
+ * 2. 每个 URL 先调一次 extractArticle。若返回 ok: false 且 transient: true，
+ *    等 backoffMs[重试序号] 后重试，最多 maxRetries 次。永久失败立刻放弃，不重试。
+ * 3. 不同 URL 之间等待 delayMs。第一个 URL 之前不等待，最后一个之后也不等待。
+ * 4. attempts 记录实际调用 extractArticle 的次数（首次算 1）。
+ * 5. 返回顺序必须与传入的 urls 顺序一致。
+ * 6. 绝不抛异常。
+ */
+export async function extractArticles(
+  urls: string[],
+  options?: BatchOptions,
+): Promise<BatchItem[]> {
+  const timeoutMs = options?.timeoutMs;
+  const minTextLength = options?.minTextLength;
+  const delayMs = options?.delayMs ?? 1500;
+  const maxRetries = options?.maxRetries ?? 2;
+  const backoffMs = options?.backoffMs ?? [2000, 5000];
+  const onProgress = options?.onProgress;
+  const sleepFn = options?.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
+
+  const results: BatchItem[] = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i] || "";
+    let result: ExtractResult = {
+      ok: false,
+      reason: "no_content",
+      detail: "Uninitialized",
+      transient: false,
+    };
+    let attempts = 0;
+
+    // 重试循环：首次 + 最多 maxRetries 次
+    for (let retryCount = 0; retryCount <= maxRetries; retryCount++) {
+      attempts += 1;
+      result = await extractArticle(url, { timeoutMs, minTextLength });
+
+      if (result.ok) {
+        // 成功，退出重试循环
+        break;
+      }
+
+      // 失败。如果是临时失败且还有重试次数，则等待后重试；否则退出
+      if (result.transient && retryCount < maxRetries) {
+        const waitMs = backoffMs[retryCount] ?? backoffMs[backoffMs.length - 1] ?? 5000;
+        await sleepFn(waitMs);
+      } else {
+        // 永久失败或已耗尽重试次数，退出循环（此时 result 是最后一次的失败）
+        break;
+      }
+    }
+
+    results.push({ url, result, attempts });
+    onProgress?.(i + 1, urls.length, url);
+
+    // 不同 URL 之间的间隔（不在最后一个之后等待）
+    if (i < urls.length - 1) {
+      await sleepFn(delayMs);
+    }
+  }
+
+  return results;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
 
-import { extractArticle } from "./extract.js";
+import { extractArticle, extractArticles } from "./extract.js";
 
 // 保存原始 fetch
 const originalFetch = globalThis.fetch;
@@ -502,6 +502,424 @@ describe("extractArticle", () => {
         // 当 response.url 为空时，应该回退到原始 url
         assert.equal(result.finalUrl, "https://example.com/original");
       }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("transient: timeout → true", async () => {
+    (globalThis as any).fetch = async () => {
+      throw new DOMException("Signal timeout", "TimeoutError");
+    };
+
+    try {
+      const result = await extractArticle("https://example.com/slow");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "timeout");
+        assert.equal(result.transient, true);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("transient: network → true", async () => {
+    (globalThis as any).fetch = async () => {
+      throw new Error("Network unreachable");
+    };
+
+    try {
+      const result = await extractArticle("https://example.com/broken");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "network");
+        assert.equal(result.transient, true);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("transient: too_short → true", async () => {
+    const htmlBody = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Short</title>
+</head>
+<body>
+  <p>Hi.</p>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/short": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: htmlBody,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/short");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "too_short");
+        assert.equal(result.transient, true);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("transient: no_content → false", async () => {
+    const htmlBody = `<!DOCTYPE html>
+<html>
+<head>
+  <title></title>
+</head>
+<body>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/empty": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: htmlBody,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/empty");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "no_content");
+        assert.equal(result.transient, false);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("transient: not_html → false", async () => {
+    stubFetch({
+      "https://example.com/image.png": {
+        status: 200,
+        headers: { "content-type": "image/png" },
+        body: "fake image data",
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/image.png");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "not_html");
+        assert.equal(result.transient, false);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("http_error: 500 → transient: true，status: 500", async () => {
+    stubFetch({
+      "https://example.com/error500": {
+        status: 500,
+        body: "Internal Server Error",
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/error500");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "http_error");
+        assert.equal(result.transient, true);
+        assert.equal(result.status, 500);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("http_error: 404 → transient: false，status: 404", async () => {
+    stubFetch({
+      "https://example.com/notfound": {
+        status: 404,
+        body: "Not Found",
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/notfound");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "http_error");
+        assert.equal(result.transient, false);
+        assert.equal(result.status, 404);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("http_error: 429 → transient: true，status: 429", async () => {
+    stubFetch({
+      "https://example.com/ratelimit": {
+        status: 429,
+        body: "Too Many Requests",
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/ratelimit");
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.reason, "http_error");
+        assert.equal(result.transient, true);
+        assert.equal(result.status, 429);
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("请求头里有 Accept-Language", async () => {
+    const htmlBody = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Article</title>
+</head>
+<body>
+  <p>This is a normal article with sufficient content to pass the minimum text length requirement. The request headers should include Accept-Language header to ensure proper language negotiation with the server.</p>
+</body>
+</html>`;
+
+    let capturedHeaders: Record<string, string> = {};
+
+    (globalThis as any).fetch = async (url: string, options?: { headers?: Record<string, string> }) => {
+      capturedHeaders = options?.headers || {};
+      return new Response(htmlBody, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+      });
+    };
+
+    try {
+      await extractArticle("https://example.com/article");
+      assert(capturedHeaders["Accept-Language"], "Accept-Language header not found");
+      assert.equal(capturedHeaders["Accept-Language"], "zh-CN,zh;q=0.9,en;q=0.8");
+    } finally {
+      restoreFetch();
+    }
+  });
+});
+
+describe("extractArticles", () => {
+  test("too_short 触发重试，第二次成功 → result ok: true，attempts === 2", async () => {
+    let callCount = 0;
+    const shortHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Short</title>
+</head>
+<body>
+  <p>Hi.</p>
+</body>
+</html>`;
+
+    const normalHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Normal</title>
+</head>
+<body>
+  <p>This is a normal article with sufficient content to pass the minimum text length requirement for extraction. Adding more text here to ensure we exceed the 200 character threshold. This is critical for the test to pass correctly. We need lots of content in this paragraph.</p>
+</body>
+</html>`;
+
+    (globalThis as any).fetch = async (url: string) => {
+      callCount += 1;
+      // 第一次调用返回 too_short，第二次返回正常内容
+      const body = callCount === 1 ? shortHtml : normalHtml;
+      const response = new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+      });
+      Object.defineProperty(response, "url", { value: url, writable: false });
+      return response;
+    };
+
+    try {
+      const results = await extractArticles(
+        ["https://example.com/test"],
+        {
+          delayMs: 0,
+          backoffMs: [0],
+          sleep: async () => {}, // 不实际等待
+        },
+      );
+      assert.equal(results.length, 1);
+      assert.equal(results[0]!.result.ok, true);
+      assert.equal(results[0]!.attempts, 2);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("永久失败（not_html）不重试 → attempts === 1", async () => {
+    let callCount = 0;
+
+    stubFetch({
+      "https://example.com/pdf": {
+        status: 200,
+        headers: { "content-type": "application/pdf" },
+        body: "%PDF fake",
+      },
+    });
+
+    const originalFetch = (globalThis as any).fetch;
+    (globalThis as any).fetch = async (url: string) => {
+      callCount += 1;
+      return originalFetch(url);
+    };
+
+    try {
+      const results = await extractArticles(
+        ["https://example.com/pdf"],
+        {
+          delayMs: 0,
+          sleep: async () => {},
+        },
+      );
+      assert.equal(results.length, 1);
+      assert.equal(results[0]!.result.ok, false);
+      if (!results[0]!.result.ok) {
+        assert.equal(results[0]!.result.reason, "not_html");
+      }
+      assert.equal(results[0]!.attempts, 1);
+      assert.equal(callCount, 1);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("临时失败重试耗尽 → 返回最后一次失败，attempts === 1 + maxRetries", async () => {
+    let callCount = 0;
+
+    (globalThis as any).fetch = async () => {
+      callCount += 1;
+      // 始终返回 timeout（临时失败）
+      throw new DOMException("Signal timeout", "TimeoutError");
+    };
+
+    try {
+      const results = await extractArticles(
+        ["https://example.com/slow"],
+        {
+          delayMs: 0,
+          maxRetries: 2,
+          backoffMs: [0, 0],
+          sleep: async () => {},
+        },
+      );
+      assert.equal(results.length, 1);
+      assert.equal(results[0]!.result.ok, false);
+      if (!results[0]!.result.ok) {
+        assert.equal(results[0]!.result.reason, "timeout");
+      }
+      assert.equal(results[0]!.attempts, 3); // 首次 + 2 次重试
+      assert.equal(callCount, 3);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("返回顺序与输入顺序一致", async () => {
+    const responses: Record<string, string> = {
+      "https://example.com/a": "A",
+      "https://example.com/b": "B",
+      "https://example.com/c": "C",
+    };
+
+    stubFetch({
+      "https://example.com/a": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: `<!DOCTYPE html><html><head><title>A</title></head><body><p>${"A".repeat(300)}</p></body></html>`,
+      },
+      "https://example.com/b": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: `<!DOCTYPE html><html><head><title>B</title></head><body><p>${"B".repeat(300)}</p></body></html>`,
+      },
+      "https://example.com/c": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: `<!DOCTYPE html><html><head><title>C</title></head><body><p>${"C".repeat(300)}</p></body></html>`,
+      },
+    });
+
+    try {
+      const results = await extractArticles(
+        ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+        {
+          delayMs: 0,
+          sleep: async () => {},
+        },
+      );
+      assert.equal(results.length, 3);
+      assert.equal(results[0]!.url, "https://example.com/a");
+      assert.equal(results[1]!.url, "https://example.com/b");
+      assert.equal(results[2]!.url, "https://example.com/c");
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("onProgress 被调用，参数正确", async () => {
+    const normalHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Article</title>
+</head>
+<body>
+  <p>This is a normal article with sufficient content to pass the minimum text length requirement.</p>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/1": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: normalHtml,
+      },
+      "https://example.com/2": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: normalHtml,
+      },
+    });
+
+    const calls: Array<{ done: number; total: number; url: string }> = [];
+
+    try {
+      await extractArticles(
+        ["https://example.com/1", "https://example.com/2"],
+        {
+          delayMs: 0,
+          sleep: async () => {},
+          onProgress: (done, total, url) => {
+            calls.push({ done, total, url });
+          },
+        },
+      );
+
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[0], { done: 1, total: 2, url: "https://example.com/1" });
+      assert.deepEqual(calls[1], { done: 2, total: 2, url: "https://example.com/2" });
     } finally {
       restoreFetch();
     }
