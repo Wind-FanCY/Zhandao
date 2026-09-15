@@ -8,6 +8,8 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/express": "^5.0.6",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.10.7",
     "@types/turndown": "^5.0.6",
@@ -16,6 +18,8 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "compression": "^1.8.2",
+    "express": "^5.2.1",
     "jsdom": "^30.0.1",
     "turndown": "^7.2.4"
   }
