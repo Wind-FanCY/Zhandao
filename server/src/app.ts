@@ -4,6 +4,14 @@ import cors from "cors";
 import { readInbox, InboxFolderNotFound } from "./inbox/chrome-bookmarks.js";
 import { extractArticles, type ExtractResult, type BatchItem } from "./inbox/extract.js";
 
+/**
+ * 声明一个最小接口来表示可能有 flush 方法的 Response。
+ * compression 中间件会给 Response 对象添加 flush 方法。
+ */
+interface Flushable {
+  flush?: () => void;
+}
+
 /** 单个作业的状态跟踪 */
 interface Job {
   jobId: string;
@@ -41,11 +49,11 @@ function broadcastEvent(job: Job, eventType: string, data: unknown): void {
   for (const listener of job.listeners) {
     try {
       listener.write(message);
-      // 如果启用了 compression，必须 flush 以确保数据立刻发送
-      // 见 CLAUDE.md "这是个实测过的坑，必须处理"
-      if ((listener as any).flush) {
-        (listener as any).flush();
-      }
+      // 如果启用了 compression，必须 flush 以确保数据立刻发送。
+      // compression 中间件会给 Response 对象添加 flush 方法，用来强制 flush 缓冲的数据。
+      // 这是实测过的坑，不处理会导致 SSE 事件堆积在缓冲区中延迟发送。
+      const maybeFlushable = listener as unknown as Flushable;
+      maybeFlushable.flush?.();
     } catch (err) {
       // 写入失败，移除该监听者
       const idx = job.listeners.indexOf(listener);
@@ -134,43 +142,42 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
       currentJobId = jobId;
 
       // 在后台启动抓取（不 await）
+      let succeeded = 0;
+      let failed = 0;
+
       extractArticles(urls, {
         onProgress: (done: number, total: number, url: string) => {
           broadcastEvent(job, "progress", { done, total, url });
         },
-      })
-        .then((batchResults) => {
-          let succeeded = 0;
-          let failed = 0;
+        onItem: (item: BatchItem) => {
+          // 单条结果回调：每个 URL 处理完后立即推送
+          job.results.set(item.url, item.result);
 
-          // 收集结果，广播 item 事件
-          for (const item of batchResults) {
-            job.results.set(item.url, item.result);
-
-            if (item.result.ok) {
-              succeeded += 1;
-              // 发送成功结果，markdown 只传前 300 字
-              const truncatedMarkdown = item.result.markdown.substring(0, 300);
-              broadcastEvent(job, "item", {
-                url: item.url,
-                result: {
-                  ok: true,
-                  title: item.result.title,
-                  textLength: item.result.textLength,
-                  finalUrl: item.result.finalUrl,
-                  markdown: truncatedMarkdown,
-                },
-              });
-            } else {
-              failed += 1;
-              // 发送失败结果
-              broadcastEvent(job, "item", {
-                url: item.url,
-                result: item.result,
-              });
-            }
+          if (item.result.ok) {
+            succeeded += 1;
+            // 发送成功结果，markdown 只传前 300 字
+            const truncatedMarkdown = item.result.markdown.substring(0, 300);
+            broadcastEvent(job, "item", {
+              url: item.url,
+              result: {
+                ok: true,
+                title: item.result.title,
+                textLength: item.result.textLength,
+                finalUrl: item.result.finalUrl,
+                markdown: truncatedMarkdown,
+              },
+            });
+          } else {
+            failed += 1;
+            // 发送失败结果
+            broadcastEvent(job, "item", {
+              url: item.url,
+              result: item.result,
+            });
           }
-
+        },
+      })
+        .then(() => {
           // 广播完成事件
           broadcastEvent(job, "done", {
             total: urls.length,
@@ -199,8 +206,8 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
           // 未预期的错误，广播给所有监听者
           broadcastEvent(job, "done", {
             total: urls.length,
-            succeeded: 0,
-            failed: urls.length,
+            succeeded,
+            failed,
           });
           job.completed = true;
         });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
 
-import { extractArticle, extractArticles } from "./extract.js";
+import { extractArticle, extractArticles, type BatchItem } from "./extract.js";
 
 // 保存原始 fetch
 const originalFetch = globalThis.fetch;
@@ -920,6 +920,66 @@ describe("extractArticles", () => {
       assert.equal(calls.length, 2);
       assert.deepEqual(calls[0], { done: 1, total: 2, url: "https://example.com/1" });
       assert.deepEqual(calls[1], { done: 2, total: 2, url: "https://example.com/2" });
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("onItem 在每个 URL 完成后被调用，调用次数等于 URL 数", async () => {
+    const normalHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Article</title>
+</head>
+<body>
+  <p>This is a normal article with sufficient content to pass the minimum text length requirement.</p>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/1": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: normalHtml,
+      },
+      "https://example.com/2": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: normalHtml,
+      },
+      "https://example.com/3": {
+        status: 404,
+        body: "Not found",
+      },
+    });
+
+    const items: BatchItem[] = [];
+
+    try {
+      const results = await extractArticles(
+        ["https://example.com/1", "https://example.com/2", "https://example.com/3"],
+        {
+          delayMs: 0,
+          sleep: async () => {},
+          onItem: (item: BatchItem) => {
+            items.push(item);
+          },
+        },
+      );
+
+      // onItem 应该被调用 3 次
+      assert.equal(items.length, 3);
+      // 调用顺序应该与 URL 顺序一致
+      assert.equal(items[0]!.url, "https://example.com/1");
+      assert.equal(items[1]!.url, "https://example.com/2");
+      assert.equal(items[2]!.url, "https://example.com/3");
+      // 内容应该与最终返回的数组一致
+      assert.deepEqual(items[0]!.result, results[0]!.result);
+      assert.deepEqual(items[1]!.result, results[1]!.result);
+      assert.deepEqual(items[2]!.result, results[2]!.result);
+      assert.equal(items[0]!.attempts, results[0]!.attempts);
+      assert.equal(items[1]!.attempts, results[1]!.attempts);
+      assert.equal(items[2]!.attempts, results[2]!.attempts);
     } finally {
       restoreFetch();
     }

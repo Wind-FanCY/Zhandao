@@ -287,6 +287,8 @@ export type BatchOptions = {
   backoffMs?: number[];
   /** 进度回调，便于 UI 显示 */
   onProgress?: (done: number, total: number, url: string) => void;
+  /** 单条结果回调，每个 URL 处理完（含重试结束）后立即调用 */
+  onItem?: (item: BatchItem) => void;
   /** 可注入的 sleep 函数，用于测试。默认使用真实的 setTimeout */
   sleep?: (ms: number) => Promise<void>;
 };
@@ -315,6 +317,7 @@ export async function extractArticles(
   const maxRetries = options?.maxRetries ?? 2;
   const backoffMs = options?.backoffMs ?? [2000, 5000];
   const onProgress = options?.onProgress;
+  const onItem = options?.onItem;
   const sleepFn = options?.sleep ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
 
   const results: BatchItem[] = [];
@@ -349,7 +352,12 @@ export async function extractArticles(
       }
     }
 
-    results.push({ url, result, attempts });
+    const item: BatchItem = { url, result, attempts };
+    results.push(item);
+
+    // 单条结果回调：在每个 URL 处理完后立即调用（含重试结束）
+    onItem?.(item);
+
     onProgress?.(i + 1, urls.length, url);
 
     // 不同 URL 之间的间隔（不在最后一个之后等待）

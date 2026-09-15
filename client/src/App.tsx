@@ -7,14 +7,37 @@ interface InboxEntry {
   addedAt: string | null;
 }
 
-interface ExtractResult {
-  ok: boolean;
-  [key: string]: unknown;
+/**
+ * SSE 的 item 事件载荷中的成功结果。
+ * 注意：这不是服务端的 ExtractSuccess，而是裁剪后的 wire 格式（markdown 只传前 300 字）。
+ */
+interface WireSuccess {
+  ok: true;
+  title: string;
+  textLength: number;
+  finalUrl: string;
+  markdown: string;
 }
+
+/**
+ * SSE 的 item 事件载荷中的失败结果。
+ */
+interface WireFailure {
+  ok: false;
+  reason: "not_html" | "http_error" | "network" | "timeout" | "no_content" | "too_short";
+  detail: string;
+  transient: boolean;
+  status?: number;
+}
+
+/**
+ * SSE 的 item 事件载荷中的结果联合类型。
+ */
+type WireResult = WireSuccess | WireFailure;
 
 interface EntryState {
   status: "待抓取" | "抓取中" | "已就绪" | "失败";
-  result?: ExtractResult;
+  result?: WireResult;
   expanded?: boolean;
 }
 
@@ -294,22 +317,22 @@ export function App() {
                           {state.expanded ? "收起" : "展开"}
                         </button>
                       )}
-                      {state.status === "失败" && state.result && (
+                      {state.status === "失败" && state.result && !state.result.ok && (
                         <div style={{ marginLeft: "8px", fontSize: "12px", color: "#f44336" }}>
-                          {(state.result as any).reason} {(state.result as any).transient ? "(临时失败)" : "(永久失败)"}
+                          {state.result.reason} {state.result.transient ? "(临时失败)" : "(永久失败)"}
                         </div>
                       )}
                     </td>
                   </tr>
 
-                  {state.status === "已就绪" && state.expanded && state.result && (state.result as any).ok && (
+                  {state.status === "已就绪" && state.expanded && state.result && state.result.ok && (
                     <tr style={{ backgroundColor: "#f9f9f9" }}>
                       <td colSpan={4} style={{ padding: "15px" }}>
                         <div>
-                          <strong>抽取标题：</strong> {(state.result as any).title}
+                          <strong>抽取标题：</strong> {state.result.title}
                         </div>
                         <div style={{ marginTop: "10px" }}>
-                          <strong>字数：</strong> {(state.result as any).textLength}
+                          <strong>字数：</strong> {state.result.textLength}
                         </div>
                         <div style={{ marginTop: "10px" }}>
                           <strong>正文开头：</strong>
@@ -326,7 +349,7 @@ export function App() {
                               wordBreak: "break-word",
                             }}
                           >
-                            {(state.result as any).markdown}
+                            {state.result.markdown}
                           </pre>
                         </div>
                       </td>
