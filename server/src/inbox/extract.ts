@@ -111,6 +111,54 @@ function removeFragment(url: string): string {
 }
 
 /**
+ * 拆掉包在 <pre> 外面、Readability 会当噪音清掉的外壳 div。
+ *
+ * 背景：某些站点生成器（实测 VuePress，如 xiaolincoding.com）给代码块套一层或多层
+ * `<div>`（行号栏、复制按钮、语言标签等都塞在同一层或兄弟节点里）。Readability 用一套
+ * 通用的「内容密度」启发式打分，这层壳本身文字密度低、又不在它认识的正文容器里，
+ * 于是连壳带里面的 <pre> 一起被判定为噪音删除——41 篇实测样本因此代码块全部丢失
+ * （socket / bind / AF_INET 等关键词抽取结果里 0 次命中）。
+ *
+ * 判据刻意不按 class 名匹配（比如 `div[class*="language-"]`）：那等于给某一个站点生成器
+ * 打补丁，换一家生成器、换一个 class 命名习惯就失效。这里的判据与站点无关——
+ * 「这个 div 的文本内容基本就是它里面那段代码本身」，只要这一点成立就把 pre 从壳里拎出来，
+ * 换回原来 pre 所在的位置，Readability 就会把它当成普通内容保留。
+ *
+ * `* 1.5 + 60` 的余量是留给行号、复制按钮这类围绕代码的装饰性文字的：纯代码本身
+ * 一般不会让外壳文本膨胀到代码长度的 1.5 倍以上，超过这个阈值就说明壳里混进了
+ * 大段与代码无关的说明文字（例如图文混排的正文段落），此时不应该把 pre 单独拎出来，
+ * 否则会破坏原本合理的图文结构。
+ *
+ * 实测：xiaolincoding.com/network/3_tcp/tcp_no_listen.html 正文由 1950 字符升到 4477
+ * （+129%），围栏数由 0 升到 6。
+ *
+ * @returns 实际被拎出来的 pre 数量，仅用于日志 / 调试，不影响调用方逻辑。
+ */
+function unwrapCodeWrappers(doc: Document): number {
+  let n = 0;
+  for (const pre of Array.from(doc.querySelectorAll("pre"))) {
+    const codeLen = pre.textContent?.trim().length ?? 0;
+    if (codeLen === 0) continue; // 空 <pre> 没有信号可判断，不处理
+
+    // 沿着父链往上找，只要父节点是 div 且其全部文本仍然「约等于」这段代码，就继续往上剥一层
+    let node: Element = pre;
+    while (
+      node.parentElement &&
+      node.parentElement.tagName === "DIV" &&
+      (node.parentElement.textContent?.trim().length ?? 0) <= codeLen * 1.5 + 60
+    ) {
+      node = node.parentElement;
+    }
+
+    if (node !== pre) {
+      node.replaceWith(pre);
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/**
  * 从 URL 抽取文章正文和元数据。
  *
  * @param url 目标页面 URL
@@ -207,6 +255,9 @@ export async function extractArticle(
     let article: ReturnType<Readability["parse"]>;
     try {
       const dom = new JSDOM(html, { url: finalUrlBase });
+      // 必须在交给 Readability 之前处理，见 unwrapCodeWrappers 的注释：
+      // Readability 会把代码块的外壳 div 连同里面的 <pre> 一起当噪音清掉
+      unwrapCodeWrappers(dom.window.document);
       const reader = new Readability(dom.window.document);
       article = reader.parse();
     } catch (err) {

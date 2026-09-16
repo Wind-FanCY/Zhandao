@@ -717,6 +717,187 @@ describe("extractArticle", () => {
   });
 });
 
+// unwrapCodeWrappers 是内部函数（未导出），这里全部通过公开的 extractArticle + stubFetch
+// 间接验证——与本文件其他用例的写法保持一致，不给内部实现单独开测试口子。
+describe("extractArticle - 代码块外壳（unwrapCodeWrappers）", () => {
+  // 用于凑够 minTextLength（默认 200）的填充段落，内容本身无所谓，纯粹是配额
+  const padding = "这是正文的填充段落，用来保证抽取结果达到最小文本长度要求。".repeat(6);
+
+  test("VuePress 形状（外层 div + 行号栏）→ 代码块不再被 Readability 当噪音清掉", async () => {
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>VuePress 代码块</title></head>
+<body>
+<article>
+<p>${padding}</p>
+<div class="language-c"><pre><code>int main() {
+    return 0;
+}
+</code></pre><div class="line-numbers-wrapper">1
+2
+3</div></div>
+<p>${padding}</p>
+</article>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/vuepress": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: html,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/vuepress");
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert(result.markdown.includes("int main"), "代码内容应保留在抽取结果里");
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("守卫生效：div 里说明文字远比代码长时，不拎出 pre，图文结构不受影响", async () => {
+    const longExplanation =
+      "这是一段很长的说明文字，用来测试守卫是否生效，防止把代码从正常的图文混排结构中拎出来破坏排版。".repeat(6);
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>图文混排</title></head>
+<body>
+<article>
+<p>${padding}</p>
+<div class="mixed">
+<p>${longExplanation}</p>
+<pre><code>x = 1</code></pre>
+</div>
+<p>${padding}</p>
+</article>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/mixed": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: html,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/mixed");
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        // 说明文字和代码都还在——没有因为误判把 pre 单独拎出来而破坏原有结构
+        assert(result.markdown.includes("说明文字"), "长说明文字不应丢失");
+        assert(result.markdown.includes("x = 1"), "代码内容也应保留");
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("已在顶层的 <pre>：不做任何改动", async () => {
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>顶层代码块</title></head>
+<body>
+<article>
+<p>${padding}</p>
+<pre><code>top level code</code></pre>
+<p>${padding}</p>
+</article>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/toplevel": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: html,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/toplevel");
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert(result.markdown.includes("top level code"));
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("嵌套多层外壳：拎到最外层那个仍符合条件的 div", async () => {
+    // outer 包 inner 包 pre，outer 上还挂着一段装饰性文字（行号一类）。
+    // 只拎到 inner 那一层的话，outer 连同装饰文字会原样保留；
+    // 拎到最外层的 outer 时，outer 被整体替换成裸 pre，装饰文字应随之消失。
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>嵌套外壳</title></head>
+<body>
+<article>
+<p>${padding}</p>
+<div class="outer"><div class="inner"><pre><code>nested code snippet here</code></pre></div><span class="line-num">1 2 3</span></div>
+<p>${padding}</p>
+</article>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/nested": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: html,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/nested");
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert(result.markdown.includes("nested code snippet here"), "代码内容应保留");
+        assert(!result.markdown.includes("1 2 3"), "拎到最外层应连带丢掉装饰性行号文字");
+      }
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("空 <pre>：不处理，不报错", async () => {
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>空代码块</title></head>
+<body>
+<article>
+<p>${padding}</p>
+<div class="wrapper-empty"><pre></pre></div>
+<p>${padding}</p>
+</article>
+</body>
+</html>`;
+
+    stubFetch({
+      "https://example.com/emptypre": {
+        status: 200,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+        body: html,
+      },
+    });
+
+    try {
+      const result = await extractArticle("https://example.com/emptypre");
+      // 空 <pre> 不应引发异常，抽取应正常成功（内容来自周围段落）
+      assert.equal(result.ok, true);
+    } finally {
+      restoreFetch();
+    }
+  });
+});
+
 describe("extractArticles", () => {
   test("too_short 触发重试，第二次成功 → result ok: true，attempts === 2", async () => {
     let callCount = 0;
