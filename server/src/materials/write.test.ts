@@ -12,6 +12,27 @@ let testDataDir: string;
 // 在测试期间，保存原始的 process.env 和 resolveDataDir
 const originalDataDirEnv = process.env.ZHANDAO_DATA_DIR;
 
+/**
+ * 读回 frontmatter 并收窄成可索引的对象。
+ *
+ * 用类型守卫而不是 `as Record<string, unknown>`：`yamlLoad` 返回 unknown，
+ * 断言只是告诉编译器「相信我」，运行时什么都没检查。测试里断言错了顶多
+ * 报个怪错误，但这个仓库今天已经因为同一类写法修过三次 bug，不给它留样板。
+ * 见 CLAUDE.md「外部数据必须校验，不能用断言」。
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseFrontmatter(content: string): Record<string, unknown> {
+  const lines = content.split("\n");
+  const endIdx = lines.findIndex((line, i) => i > 0 && line === "---");
+  assert.ok(endIdx > 0, "Missing closing ---");
+  const parsed: unknown = yamlLoad(lines.slice(1, endIdx).join("\n"));
+  if (!isRecord(parsed)) throw new Error("frontmatter 解析结果不是对象");
+  return parsed;
+}
+
 describe("writeMaterial", () => {
   beforeEach(async () => {
     // 创建临时目录
@@ -80,13 +101,7 @@ describe("writeMaterial", () => {
     // 检查 frontmatter 分隔符
     assert.equal(lines[0], "---");
 
-    // 找到结束的 ---
-    const endIdx = lines.findIndex((line, i) => i > 0 && line === "---");
-    assert.ok(endIdx > 0, "Missing closing ---");
-
-    // 解析 frontmatter
-    const frontmatterStr = lines.slice(1, endIdx).join("\n");
-    const frontmatter = yamlLoad(frontmatterStr) as Record<string, unknown>;
+    const frontmatter = parseFrontmatter(content);
 
     assert.equal(frontmatter.title, "Test Article");
     assert.equal(frontmatter.source, "https://example.com/test");
@@ -204,10 +219,7 @@ describe("writeMaterial", () => {
     // # 应该被保留或去掉（取决于是否在清理字符列表中）
     // 根据实现，# 不在清理列表中，应该保留
     const content = await readFile(result.path, "utf-8");
-    const lines = content.split("\n");
-    const endIdx = lines.findIndex((line, i) => i > 0 && line === "---");
-    const frontmatterStr = lines.slice(1, endIdx).join("\n");
-    const frontmatter = yamlLoad(frontmatterStr) as Record<string, unknown>;
+    const frontmatter = parseFrontmatter(content);
 
     // YAML 应该能正确解析包含 # 的标题
     assert.equal(frontmatter.title, "Test # With # Hashes");
@@ -222,10 +234,7 @@ describe("writeMaterial", () => {
 
     const result = await writeMaterial(material);
     const content = await readFile(result.path, "utf-8");
-    const lines = content.split("\n");
-    const endIdx = lines.findIndex((line, i) => i > 0 && line === "---");
-    const frontmatterStr = lines.slice(1, endIdx).join("\n");
-    const frontmatter = yamlLoad(frontmatterStr) as Record<string, unknown>;
+    const frontmatter = parseFrontmatter(content);
 
     assert.equal(frontmatter.title, "Vue.js: The Progressive Framework");
   });
@@ -239,10 +248,7 @@ describe("writeMaterial", () => {
 
     const result = await writeMaterial(material);
     const content = await readFile(result.path, "utf-8");
-    const lines = content.split("\n");
-    const endIdx = lines.findIndex((line, i) => i > 0 && line === "---");
-    const frontmatterStr = lines.slice(1, endIdx).join("\n");
-    const frontmatter = yamlLoad(frontmatterStr) as Record<string, unknown>;
+    const frontmatter = parseFrontmatter(content);
 
     assert.equal(frontmatter.title, 'Quote: "This is a test"');
   });
@@ -260,6 +266,64 @@ describe("writeMaterial", () => {
     // 第二次读取应该得到相同的内容
     const content2 = await readFile(result.path, "utf-8");
     assert.equal(content, content2);
+  });
+});
+
+describe("from 字段（ADR-0010：索引页展开出的材料）", () => {
+  test("有 from 时，frontmatter 里出现且在最后一行", async () => {
+    const dir = await mkdtemp(resolve(tmpdir(), "zhandao-from-"));
+    process.env.ZHANDAO_DATA_DIR = dir;
+
+    const result = await writeMaterial({
+      title: "TCP 不 listen 会怎样",
+      markdown: "# 正文\n\n内容",
+      source: "https://xiaolincoding.com/network/3_tcp/tcp_no_listen.html",
+      from: "https://xiaolincoding.com/network/",
+    });
+
+    const raw = await readFile(result.path, "utf-8");
+    const frontmatter = parseFrontmatter(raw);
+
+    assert.equal(frontmatter.from, "https://xiaolincoding.com/network/");
+
+    // from 必须是 frontmatter 的最后一个键
+    const keys = Object.keys(frontmatter);
+    assert.equal(keys[keys.length - 1], "from", `from 应在最后，实际顺序: ${keys.join(",")}`);
+  });
+
+  test("无 from 时，frontmatter 完全不出现该键", async () => {
+    const dir = await mkdtemp(resolve(tmpdir(), "zhandao-nofrom-"));
+    process.env.ZHANDAO_DATA_DIR = dir;
+
+    const result = await writeMaterial({
+      title: "普通材料",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+
+    const raw = await readFile(result.path, "utf-8");
+    const frontmatter = parseFrontmatter(raw);
+
+    assert.equal(Object.prototype.hasOwnProperty.call(frontmatter, "from"), false);
+    assert.ok(!raw.includes("from:"), `frontmatter 不应包含 from 键:\n${raw}`);
+  });
+
+  test("from 含中文与查询串时，往返解析正确", async () => {
+    const dir = await mkdtemp(resolve(tmpdir(), "zhandao-from-cjk-"));
+    process.env.ZHANDAO_DATA_DIR = dir;
+
+    const fromUrl = "https://example.com/索引页?ref=weekly&utm_source=测试#top";
+    const result = await writeMaterial({
+      title: "带查询串来源的材料",
+      markdown: "内容",
+      source: "https://example.com/a.html",
+      from: fromUrl,
+    });
+
+    const raw = await readFile(result.path, "utf-8");
+    const frontmatter = parseFrontmatter(raw);
+
+    assert.equal(frontmatter.from, fromUrl);
   });
 });
 

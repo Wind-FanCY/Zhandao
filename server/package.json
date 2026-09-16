@@ -10,7 +10,8 @@
     "test": "node --import tsx --test 'src/**/*.test.ts' 'src/*.test.ts'",
     "note": "tsx src/scripts/note.ts",
     "eval": "tsx src/scripts/eval.ts",
-    "keywords": "tsx src/scripts/backfill-keywords.ts"
+    "keywords": "tsx src/scripts/backfill-keywords.ts",
+    "expand": "tsx src/scripts/expand-index-page.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

@@ -29,7 +29,9 @@ export type ExtractResult = ExtractSuccess | ExtractFailure;
 const DEFAULT_TIMEOUT_MS = 15000;
 const DEFAULT_MIN_TEXT_LENGTH = 200;
 
-const USER_AGENT =
+// 导出给 expand-index-page.ts 复用：抓索引页原始 HTML 时要用同一套请求头，
+// 免得两处各写一份、日后改一处忘了改另一处。
+export const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /**

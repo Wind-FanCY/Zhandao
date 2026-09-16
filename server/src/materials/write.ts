@@ -12,6 +12,8 @@ export interface NewMaterial {
   markdown: string;
   /** 最终 URL（已去 fragment） */
   source: string;
+  /** 展开出这份材料的**索引页** URL（已去 fragment）。事实而非判断，见 ADR-0010 */
+  from?: string;
 }
 
 export interface WrittenMaterial {
@@ -45,13 +47,17 @@ export async function writeMaterial(m: NewMaterial): Promise<WrittenMaterial> {
   const filename = cleanedTitle ? `${id}-${cleanedTitle}.md` : `${id}.md`;
   const filepath = resolve(materialsDir, filename);
 
-  // 构建 frontmatter
+  // 构建 frontmatter。`from` 放最后且仅在有值时写入——它是「事实」（ADR-0010：
+  // 索引页展开出了我），不是每份材料都有来处，空字符串/undefined 不该占一行。
   const frontmatter: Record<string, unknown> = {
     id,
     title: m.title,
     source: m.source,
     captured: new Date().toISOString(),
   };
+  if (m.from) {
+    frontmatter.from = m.from;
+  }
 
   // 用 js-yaml 序列化 frontmatter
   const frontmatterStr = yamlDump(frontmatter, {

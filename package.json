@@ -13,7 +13,8 @@
     "search": "npm --workspace server run search --",
     "note": "npm --workspace server run note --",
     "eval": "npm --workspace server run eval",
-    "keywords": "npm --workspace server run keywords --"
+    "keywords": "npm --workspace server run keywords --",
+    "expand": "npm --workspace server run expand --"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"
