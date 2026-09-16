@@ -83,7 +83,7 @@ Promise is a JavaScript feature.`;
     const results = searchMaterials(index, "Promise");
 
     assert.ok(results.length > 0);
-    assert.equal(results[0].id, "test-002");
+    assert.equal(results[0]?.id, "test-002");
   });
 
   test("标题命中：只在标题里出现的词也能检索到", async () => {
@@ -107,7 +107,7 @@ This tutorial covers the framework.`;
     const results = searchMaterials(index, "ReactJS");
 
     assert.ok(results.length > 0);
-    assert.equal(results[0].id, "test-003");
+    assert.equal(results[0]?.id, "test-003");
   });
 
   test("frontmatter 坏掉的文件被跳过，其余仍可索引", async () => {
@@ -243,7 +243,7 @@ Callback is old pattern.`,
     // 查询 "Promise"，test-101 应该排第一
     const results = searchMaterials(index, "Promise");
     assert.ok(results.length > 0);
-    assert.equal(results[0].id, "test-101");
+    assert.equal(results[0]?.id, "test-101");
   });
 
   test("缺少必需 frontmatter 字段的文件被跳过", async () => {
@@ -333,6 +333,7 @@ Promise promise promise.`;
 
     assert.ok(results.length > 0);
     const result = results[0];
+    assert.ok(result);
     assert.ok(typeof result.score === "number");
     assert.ok(result.score > 0);
     assert.equal(result.id, "test-106");

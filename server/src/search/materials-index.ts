@@ -100,8 +100,13 @@ function parseMaterialFile(
   // 提取正文（frontmatter 后面，跳过第一个空行）
   const markdownLines = lines.slice(endIdx + 1);
   // 去掉开头的空行
-  while (markdownLines.length > 0 && markdownLines[0].trim() === "") {
-    markdownLines.shift();
+  while (markdownLines.length > 0) {
+    const first = markdownLines[0];
+    if (first && first.trim() === "") {
+      markdownLines.shift();
+    } else {
+      break;
+    }
   }
   const markdown = markdownLines.join("\n");
 
@@ -189,6 +194,17 @@ export async function buildMaterialsIndex(): Promise<MaterialsIndex> {
  * @param limit 返回结果数量限制
  * @returns 按分数降序的材料列表（包含分数）
  */
+/**
+ * 按 id 取一份已索引的**材料**。
+ *
+ * 存在的理由：`MaterialsIndex` 的成员带 `_` 前缀，意在表示「内部结构」，
+ * 但 TS 的下划线没有可见性含义。与其让调用方伸手进 `_materials`，
+ * 不如给一个明确的访问器——下划线就真的只是「别直接碰」的提示。
+ */
+export function getMaterial(index: MaterialsIndex, id: string): IndexedMaterial | undefined {
+  return index._materials.get(id);
+}
+
 export function searchMaterials(
   index: MaterialsIndex,
   query: string,
@@ -202,5 +218,6 @@ export function searchMaterials(
       if (!material) return null;
       return { ...material, score: hit.score };
     })
-    .filter((item) => item !== null) as (IndexedMaterial & { score: number })[];
+    // 类型守卫而非 `as` 断言：断言会关掉收窄，守卫让编译器自己推出非 null
+    .filter((item): item is IndexedMaterial & { score: number } => item !== null);
 }

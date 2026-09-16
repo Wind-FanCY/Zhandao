@@ -11,7 +11,8 @@
     "typecheck": "npm --workspace server run typecheck && npm --workspace client run typecheck",
     "test": "npm --workspace server run test",
     "search": "npm --workspace server run search --",
-    "note": "npm --workspace server run note --"
+    "note": "npm --workspace server run note --",
+    "eval": "npm --workspace server run eval"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"

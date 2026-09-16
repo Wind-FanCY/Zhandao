@@ -135,4 +135,37 @@ describe("tokenize", () => {
     const tokens = tokenize("");
     assert.deepEqual(tokens, []);
   });
+
+  test("禁用 CJK 单字", () => {
+    const tokens = tokenize("面试题", { cjkUnigram: false, cjkBigram: true });
+    // 应该只有二字组
+    assert.ok(tokens.includes("面试"));
+    assert.ok(tokens.includes("试题"));
+    assert.ok(!tokens.includes("面"));
+    assert.ok(!tokens.includes("试"));
+    assert.ok(!tokens.includes("题"));
+  });
+
+  test("禁用 CJK 二字组", () => {
+    const tokens = tokenize("面试题", { cjkUnigram: true, cjkBigram: false });
+    // 应该只有单字
+    assert.ok(tokens.includes("面"));
+    assert.ok(tokens.includes("试"));
+    assert.ok(tokens.includes("题"));
+    assert.ok(!tokens.includes("面试"));
+    assert.ok(!tokens.includes("试题"));
+  });
+
+  test("禁用所有 CJK", () => {
+    const tokens = tokenize("Promise 面试题", {
+      cjkUnigram: false,
+      cjkBigram: false,
+    });
+    // 应该只有拉丁词项
+    assert.ok(tokens.includes("promise"));
+    assert.ok(!tokens.includes("面"));
+    assert.ok(!tokens.includes("试"));
+    assert.ok(!tokens.includes("题"));
+    assert.ok(!tokens.includes("面试"));
+  });
 });
