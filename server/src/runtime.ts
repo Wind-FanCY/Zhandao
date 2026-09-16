@@ -24,3 +24,17 @@ import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
 export function initializeProxyAgent(): void {
   setGlobalDispatcher(new EnvHttpProxyAgent());
 }
+
+/**
+ * 加载 `code/.env`（模型 API key 在里面）。
+ *
+ * Node 自带 `process.loadEnvFile`，不需要 dotenv。文件不存在时静默跳过——
+ * 大部分命令（收录、检索、评估）不需要 key，不该因为缺 .env 就跑不起来。
+ */
+export function loadEnv(): void {
+  try {
+    process.loadEnvFile(new URL("../../.env", import.meta.url).pathname);
+  } catch {
+    // .env 不存在或不可读：不是错误
+  }
+}

@@ -87,6 +87,16 @@ grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src | grep -v test 
 - **语言**：TypeScript。**前后端分离**：前端 Vite + React，后端 Express（ADR-0007）。
   一体化框架（Next.js / SvelteKit）已被明确否决，不要提议迁移——先读 ADR-0007。
   必须用单条 `npm run dev` 同时拉起前后端，否则违反 ADR-0002 的启动摩擦约束。
+- **模型调用**：`server/src/model/` 是**唯一**知道用哪家服务商的地方。
+  现在是 Claude（`claude-opus-5`，简单任务用 `effort: low`——省的是延迟不是钱）。
+  **为什么只有一家却单独关一个目录**：本人的 Claude 是学校组织账号、成本可忽略，
+  但毕业后可能换 DeepSeek。换服务商=改这里的函数体，调用方一行不动。
+  **刻意没有造 `interface ModelProvider`**：目前只有一个调用点，基于一个调用点设计的
+  接口形状大概率要重做（将来的查询改写要不要流式？出题要不要 tool use？都还不知道）。
+  等调用点长到三个以上、能看出共同形状时再抽。
+  **凭证坑（实测）**：组织级 API key（未绑定 workspace）调任何接口都返回 400，
+  要求带 `anthropic-workspace-id` 头。代码支持 `ANTHROPIC_WORKSPACE_ID` 环境变量；
+  更干净的做法是换一个绑定到 workspace 的 key。
 - **Agent**：**自己写 agent 循环**。不要引入 DeepSeek Harness、LangChain 之类的 harness/框架——本项目的目的之一就是学 agent 怎么工作，把循环抽象掉就学不到了。模型本身随意，DeepSeek 可用。
 - **RAG 分四阶段推进，每阶段对基线量化**：
   1. BM25 检索 → 生成，拿到基线 —— **已完成**。`npm run eval` 是长期存在的尺子。
@@ -103,7 +113,12 @@ grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src | grep -v test 
      所以「无内容材料拖累检索」这条说法**没有证据**；要不要剔除它，
      理由只能是「它永远答不了任何问题」（CONTEXT.md 的定义问题），不能是检索指标。
   2. 建评估集（约 20 个已知答案的问题），测 recall@5
-  3. 加查询改写（agent 把问题改写成若干说法再分别检索、合并），重测
+  3. ~~加查询改写~~ **顺序已按实测调整**：先做**索引时翻译**——收录纯英文材料时用模型
+     生成中文检索关键词写进 frontmatter（`keywords_zh`），查询时不调模型。
+     理由是数量级：查询时改写的调用次数=查询次数，索引时翻译的调用次数=材料数，
+     而个人知识库的查询远多于收录；且查询时改写会在每次检索里插一次模型往返，
+     而那正是 ADR-0009 要求压到最低的摩擦。查询改写降为备选，
+     等索引时翻译测完、纯英文材料那栏还不够再叠。
   4. 加向量，做混合检索 + RRF，重测
 
   跳过第 2 步就失去了判断后续改动是否有效的能力，那是这套流程里最值钱的一步。
