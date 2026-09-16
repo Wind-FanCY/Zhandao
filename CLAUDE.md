@@ -9,6 +9,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 目录布局：`Zhandao/` 是容器（非仓库），其下 `code/`（本仓库）与 `data/`（材料与标注，独立私有仓库）平级——见 ADR-0005。
 
+`Zhandao/CLAUDE.md` 是指向 `code/CLAUDE.md` 的**软链接**（同一 inode），这样在容器目录开会话也能加载到约束。
+内容只有一份、受 `code/` 版本控制。链接本身不受版本控制，坏了就 `ln -sf code/CLAUDE.md CLAUDE.md` 重建。
+
+## 术语表要维护 `_Code_` 行
+
+`CONTEXT.md` 里每个术语都带一行 `_Code_`，记它在代码里的名字（`材料 → material / materials/ / writeMaterial`）。
+**原因**：术语是中文、标识符是英文，两者之间本来没有任何机械可验证的联系——
+`glossary_code_consistency.py` 会把所有术语报成 dead glossary，等于永久无效。
+
+由此得到的具体好处是**能记录刻意不存在的东西**。ADR-0001 禁止引入 topic / tag 实体，
+这条约束原先只靠"有人读了本文件"来维持；现在 `CONTEXT.md` 里写着可执行的检查：
+
+```bash
+grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src | grep -v test   # 应无输出
+```
+
+**重构改了标识符名字，就要同步这一行。** 忘了也没关系——一致性脚本会把它报成 dead，那就是提醒。
+
 动手写任何代码前先读这两处。下面列出的约束全部来自它们，且**大多与常规做法相反**——照直觉写会违反其中好几条。
 
 ## 这是什么
