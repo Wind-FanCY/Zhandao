@@ -6,6 +6,10 @@ import { extractArticles, type ExtractResult, type BatchItem } from "./inbox/ext
 import { writeMaterial } from "./materials/write.js";
 import { appendProcessed, readProcessedUrls } from "./inbox/processed.js";
 import { cacheExtraction, readCachedExtraction } from "./inbox/extract-cache.js";
+import { readQuickNotes } from "./quicknotes/append.js";
+import { appendNoteProcessed, readProcessedNoteIds } from "./quicknotes/processed.js";
+import { writeAnnotation, EmptyAnnotation, MissingHostMaterial } from "./annotations/write.js";
+import { buildMaterialsIndex, searchMaterials, getMaterial, listMaterials } from "./search/materials-index.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -388,6 +392,185 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
       // 记录为已处理
       await appendProcessed({
         url,
+        decision: "dropped",
+        at: new Date().toISOString(),
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/materials
+   * 全部**材料**的标题列表，供归属界面在检索没把正确宿主排进前三时浏览。
+   * 「界面必须支持浏览，不能只有搜索」——见 CLAUDE.md。
+   */
+  app.get("/api/materials", async (req: Request, res: Response) => {
+    try {
+      const index = await buildMaterialsIndex();
+      const materials = listMaterials(index).map((m) => ({
+        id: m.id,
+        title: m.title,
+        source: m.source,
+      }));
+      res.json({ materials });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/notes/pending
+   * 列出待归属的**速记**（不在 quicknotes-processed.jsonl 里的那些），
+   * 每条附上 BM25 直出的 3 个候选宿主**材料**。
+   *
+   * 每次请求都重建索引：材料只有几篇，缓存带来的「索引与磁盘不一致」风险
+   * 比重建的开销更值得避免。
+   */
+  app.get("/api/notes/pending", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const [allNotes, processedIds, index] = await Promise.all([
+        readQuickNotes(),
+        readProcessedNoteIds(),
+        buildMaterialsIndex(),
+      ]);
+
+      const pending = allNotes
+        .filter((note) => !processedIds.has(note.id))
+        .sort((a, b) => a.at.localeCompare(b.at));
+
+      const notes = pending.map((note) => {
+        const candidates = searchMaterials(index, note.text, 3).map((m) => ({
+          id: m.id,
+          title: m.title,
+          source: m.source,
+          score: m.score,
+        }));
+        return { id: note.id, text: note.text, at: note.at, candidates };
+      });
+
+      res.json({ notes });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/notes/:id/attach
+   * 把一条**速记**归属到某份**材料**上，使它成为一条**标注**。
+   *
+   * Request body: { "text": string, "materialId": string }
+   * Response: { "annotationId": "...", "path": "..." } (201)
+   */
+  app.post(
+    "/api/notes/:id/attach",
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const noteId = req.params.id;
+        // Express 的 params 类型允许 string[]（通配符路由才会出现）；本路由只声明了
+        // `:id`，实际不会是数组，但仍需 typeof 收窄而不是断言掉这个可能性
+        if (typeof noteId !== "string") {
+          return res.status(404).json({ error: "Quicknote not found" });
+        }
+
+        const [allNotes, processedIds] = await Promise.all([
+          readQuickNotes(),
+          readProcessedNoteIds(),
+        ]);
+
+        const note = allNotes.find((n) => n.id === noteId);
+        if (!note) {
+          return res.status(404).json({ error: `Quicknote ${noteId} not found` });
+        }
+
+        if (processedIds.has(noteId)) {
+          return res.status(409).json({ error: "Quicknote already processed" });
+        }
+
+        // 手写 typeof 收窄读 body 字段，不用 `as` 断言——express 的 req.body 是外部数据，
+        // 形状不可信（这一点与 frontmatter 那条边界同理）
+        const body: unknown = req.body;
+        let text: string | undefined;
+        let materialId: string | undefined;
+        if (typeof body === "object" && body !== null) {
+          if ("text" in body && typeof body.text === "string") text = body.text;
+          if ("materialId" in body && typeof body.materialId === "string") {
+            materialId = body.materialId;
+          }
+        }
+
+        if (text === undefined || !text.trim()) {
+          return res.status(400).json({ error: "Missing or empty text" });
+        }
+
+        if (materialId === undefined || !materialId.trim()) {
+          return res.status(400).json({ error: "Missing or empty materialId" });
+        }
+
+        // 宿主材料必须存在——归属给出的是「恰好一份材料」这条必然的边
+        const index = await buildMaterialsIndex();
+        if (!getMaterial(index, materialId)) {
+          return res.status(400).json({ error: `Host material ${materialId} not found` });
+        }
+
+        // 先写文件、再记日志：日志记了而文件没写，就等于凭空丢失一条标注
+        const written = await writeAnnotation({ materialId, text });
+
+        await appendNoteProcessed({
+          quickNoteId: noteId,
+          decision: "attached",
+          at: new Date().toISOString(),
+          annotationId: written.id,
+        });
+
+        return res.status(201).json({ annotationId: written.id, path: written.path });
+      } catch (err) {
+        if (err instanceof EmptyAnnotation) {
+          return res.status(400).json({ error: err.message });
+        }
+        if (err instanceof MissingHostMaterial) {
+          return res.status(400).json({ error: err.message });
+        }
+        const message = err instanceof Error ? err.message : "Unknown error";
+        return res.status(500).json({ error: message });
+      }
+    },
+  );
+
+  /**
+   * POST /api/notes/:id/drop
+   * 把一条**速记**标记为「划掉」，无 body。
+   *
+   * Response: { "ok": true } (200)
+   */
+  app.post("/api/notes/:id/drop", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const noteId = req.params.id;
+      if (typeof noteId !== "string") {
+        return res.status(404).json({ error: "Quicknote not found" });
+      }
+
+      const [allNotes, processedIds] = await Promise.all([
+        readQuickNotes(),
+        readProcessedNoteIds(),
+      ]);
+
+      const note = allNotes.find((n) => n.id === noteId);
+      if (!note) {
+        return res.status(404).json({ error: `Quicknote ${noteId} not found` });
+      }
+
+      if (processedIds.has(noteId)) {
+        return res.status(409).json({ error: "Quicknote already processed" });
+      }
+
+      await appendNoteProcessed({
+        quickNoteId: noteId,
         decision: "dropped",
         at: new Date().toISOString(),
       });

@@ -3,6 +3,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Server } from "node:http";
 
 import { createApp } from "./app.js";
 
@@ -424,5 +425,319 @@ describe("Express App Routes", () => {
     assert.strictEqual(response.status, 200);
     const data = (await response.json()) as any;
     assert.strictEqual(data.ok, true);
+  });
+});
+
+
+/** 类型守卫而非 `as` 断言：测试里读回 fetch 响应体（本就是 unknown）时收窄类型 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+interface PendingNoteCandidate {
+  id: string;
+  title: string;
+  source: string;
+  score: number;
+}
+
+interface PendingNote {
+  id: string;
+  text: string;
+  at: string;
+  candidates: PendingNoteCandidate[];
+}
+
+function isPendingNoteCandidate(value: unknown): value is PendingNoteCandidate {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.source === "string" &&
+    typeof value.score === "number"
+  );
+}
+
+function isPendingNote(value: unknown): value is PendingNote {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.text === "string" &&
+    typeof value.at === "string" &&
+    Array.isArray(value.candidates) &&
+    value.candidates.every(isPendingNoteCandidate)
+  );
+}
+
+/** 解析 GET /api/notes/pending 的响应体，形状不对就让测试直接失败（而不是假装它对） */
+function parsePendingNotes(value: unknown): PendingNote[] {
+  if (!isRecord(value) || !Array.isArray(value.notes) || !value.notes.every(isPendingNote)) {
+    throw new Error(`GET /api/notes/pending 响应形状不对: ${JSON.stringify(value)}`);
+  }
+  return value.notes;
+}
+
+/** 解析 POST /api/notes/:id/attach 成功响应的响应体 */
+function parseAttachResponse(value: unknown): { annotationId: string; path: string } {
+  if (!isRecord(value) || typeof value.annotationId !== "string" || typeof value.path !== "string") {
+    throw new Error(`POST attach 响应形状不对: ${JSON.stringify(value)}`);
+  }
+  return { annotationId: value.annotationId, path: value.path };
+}
+
+/** 取 { ok: boolean } 响应体里的 ok 字段 */
+function parseOkResponse(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    throw new Error(`响应形状不对，缺少 ok 字段: ${JSON.stringify(value)}`);
+  }
+  return value.ok;
+}
+
+/** 取 { error: ... } 响应体里的 error 字段是否存在（不关心其具体类型） */
+function hasErrorField(value: unknown): boolean {
+  return isRecord(value) && "error" in value && Boolean(value.error);
+}
+
+describe("Notes routes (归属)", () => {
+  let tempDir: string;
+  let bookmarksFile: string;
+  let server: Server;
+  let port: number;
+  let dataDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "zhandao-notes-test-"));
+    bookmarksFile = join(tempDir, "Bookmarks");
+    dataDir = await mkdtemp(join(tmpdir(), "zhandao-notes-data-test-"));
+    process.env.ZHANDAO_DATA_DIR = dataDir;
+
+    // 空书签夹即可——这组测试只关心归属链路，不关心收件箱
+    const testBookmarks = {
+      roots: { bookmark_bar: { type: "folder", name: "书签栏", children: [] } },
+    };
+    await writeFile(bookmarksFile, JSON.stringify(testBookmarks, null, 2));
+
+    const app = createApp(bookmarksFile);
+    server = await new Promise<Server>((resolveFn) => {
+      const srv = app.listen(0, () => {
+        const address = srv.address();
+        if (address === null || typeof address === "string") {
+          throw new Error("expected AddressInfo from server.address()");
+        }
+        port = address.port;
+        resolveFn(srv);
+      });
+    });
+  });
+
+  afterEach(async () => {
+    return new Promise<void>((resolveFn) => {
+      server.close(async () => {
+        try {
+          await rm(dataDir, { recursive: true, force: true });
+        } catch {
+          // 忽略清理错误
+        }
+        delete process.env.ZHANDAO_DATA_DIR;
+        resolveFn();
+      });
+    });
+  });
+
+  test("GET /api/materials 按标题列出全部材料", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    await writeMaterial({ title: "乙材料", markdown: "内容乙", source: "https://example.com/b" });
+    await writeMaterial({ title: "甲材料", markdown: "内容甲", source: "https://example.com/a" });
+
+    const res = await fetch(`http://localhost:${port}/api/materials`);
+    assert.strictEqual(res.status, 200);
+
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    const { materials } = body;
+    assert.ok(Array.isArray(materials));
+    assert.strictEqual(materials.length, 2);
+
+    // 这个端点存在的全部理由是「可浏览的完整列表」，所以顺序稳定是它的功能而非细节：
+    // 列表每次刷新都重排，人就没法靠位置认出条目。
+    const titles: string[] = [];
+    for (const m of materials) {
+      assert.ok(isRecord(m));
+      assert.strictEqual(typeof m.title, "string");
+      if (typeof m.title === "string") titles.push(m.title);
+    }
+    assert.deepStrictEqual(titles, ["甲材料", "乙材料"]);
+  });
+
+  test("GET /api/materials 库为空时返回空数组而不是报错", async () => {
+    const res = await fetch(`http://localhost:${port}/api/materials`);
+    assert.strictEqual(res.status, 200);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.deepStrictEqual(body.materials, []);
+  });
+
+  test("GET /api/notes/pending 返回未处理的速记，附带候选材料", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+
+    await writeMaterial({
+      title: "Promise 面试题",
+      markdown: "Promise 的执行顺序与微任务队列细节",
+      source: "https://example.com/promise",
+    });
+    const note = await appendQuickNote("Promise 微任务顺序到底怎么排的");
+
+    const res = await fetch(`http://localhost:${port}/api/notes/pending`);
+    assert.strictEqual(res.status, 200);
+    const notes = parsePendingNotes(await res.json());
+
+    assert.strictEqual(notes.length, 1);
+    assert.strictEqual(notes[0]?.id, note.id);
+    assert.strictEqual(notes[0]?.text, note.text);
+    assert.ok(notes[0] && notes[0].candidates.length > 0, "库里有材料时应返回至少一个候选");
+  });
+
+  test("库里没有材料时 candidates 为空数组", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    await appendQuickNote("没有材料能接住的一句话");
+
+    const res = await fetch(`http://localhost:${port}/api/notes/pending`);
+    const notes = parsePendingNotes(await res.json());
+
+    assert.strictEqual(notes.length, 1);
+    assert.deepEqual(notes[0]?.candidates, []);
+  });
+
+  test("attach 成功后该 note 不再出现在 pending 里", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+
+    const material = await writeMaterial({
+      title: "材料 A",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+    const note = await appendQuickNote("一句速记");
+
+    const attachRes = await fetch(`http://localhost:${port}/api/notes/${note.id}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: note.text, materialId: material.id }),
+    });
+    assert.strictEqual(attachRes.status, 201);
+    const attachData = parseAttachResponse(await attachRes.json());
+    assert.ok(attachData.annotationId);
+    assert.ok(attachData.path);
+
+    const pendingRes = await fetch(`http://localhost:${port}/api/notes/pending`);
+    const pendingNotes = parsePendingNotes(await pendingRes.json());
+    assert.strictEqual(pendingNotes.length, 0);
+  });
+
+  test("attach 未知 note id 返回 404", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "材料 A",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+
+    const res = await fetch(`http://localhost:${port}/api/notes/nonexistent-id/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "文本", materialId: material.id }),
+    });
+    assert.strictEqual(res.status, 404);
+  });
+
+  test("attach 已处理的 note 返回 409", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "材料 A",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+    const note = await appendQuickNote("一句速记");
+
+    const first = await fetch(`http://localhost:${port}/api/notes/${note.id}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: note.text, materialId: material.id }),
+    });
+    assert.strictEqual(first.status, 201);
+
+    const second = await fetch(`http://localhost:${port}/api/notes/${note.id}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: note.text, materialId: material.id }),
+    });
+    assert.strictEqual(second.status, 409);
+  });
+
+  test("attach 空 text 返回 400", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "材料 A",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+    const note = await appendQuickNote("一句速记");
+
+    const res = await fetch(`http://localhost:${port}/api/notes/${note.id}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "   ", materialId: material.id }),
+    });
+    assert.strictEqual(res.status, 400);
+  });
+
+  test("attach 宿主材料不存在返回 400", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const note = await appendQuickNote("一句速记");
+
+    const res = await fetch(`http://localhost:${port}/api/notes/${note.id}/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: note.text, materialId: "nonexistent-material-id" }),
+    });
+    assert.strictEqual(res.status, 400);
+    assert.ok(hasErrorField(await res.json()), "should have error message about missing host material");
+  });
+
+  test("drop 未知 note id 返回 404", async () => {
+    const res = await fetch(`http://localhost:${port}/api/notes/nonexistent-id/drop`, {
+      method: "POST",
+    });
+    assert.strictEqual(res.status, 404);
+  });
+
+  test("drop 成功返回 200，重复 drop 返回 409", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const note = await appendQuickNote("待丢弃的一句话");
+
+    const res = await fetch(`http://localhost:${port}/api/notes/${note.id}/drop`, {
+      method: "POST",
+    });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(parseOkResponse(await res.json()), true);
+
+    const res2 = await fetch(`http://localhost:${port}/api/notes/${note.id}/drop`, {
+      method: "POST",
+    });
+    assert.strictEqual(res2.status, 409);
+  });
+
+  test("drop 后该 note 不再出现在 pending 里", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const note = await appendQuickNote("待丢弃的一句话");
+
+    await fetch(`http://localhost:${port}/api/notes/${note.id}/drop`, { method: "POST" });
+
+    const pendingRes = await fetch(`http://localhost:${port}/api/notes/pending`);
+    const pendingNotes = parsePendingNotes(await pendingRes.json());
+    assert.strictEqual(pendingNotes.length, 0);
   });
 });

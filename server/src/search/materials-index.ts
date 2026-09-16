@@ -212,6 +212,17 @@ export function getMaterial(index: MaterialsIndex, id: string): IndexedMaterial 
   return index._materials.get(id);
 }
 
+/**
+ * 列出全部已索引的**材料**，按标题排序。
+ *
+ * 存在的理由是「界面必须支持浏览」这条约束：检索只能给前几名，
+ * 而正确宿主排在第 5 时，只有一份可浏览的完整列表能让人认出它——
+ * 认出来（recognition）比想起来（recall）容易得多。
+ */
+export function listMaterials(index: MaterialsIndex): IndexedMaterial[] {
+  return [...index._materials.values()].sort((a, b) => a.title.localeCompare(b.title, "zh-Hans"));
+}
+
 export function searchMaterials(
   index: MaterialsIndex,
   query: string,

@@ -3,6 +3,7 @@ import { resolve, dirname } from "node:path";
 import { ulid } from "ulid";
 import { dump as yamlDump } from "js-yaml";
 import { resolveDataDir } from "../data-dir.js";
+import { sanitizeForFilename } from "../filename.js";
 
 export interface NewMaterial {
   /** 本人在过闸时确认或修改过的标题——不是书签标题，也不一定是抽取标题 */
@@ -16,32 +17,6 @@ export interface NewMaterial {
 export interface WrittenMaterial {
   id: string;
   path: string;
-}
-
-/**
- * 清理标题，使其适合用作文件名。
- *
- * 规则：
- * - 保留中文字符原样
- * - 去掉 / \ : * ? " < > | 和控制字符
- * - 空白折叠成单个 -
- * - 截断到 60 个字符
- * - 清理后为空则返回空字符串
- */
-function sanitizeTitle(title: string): string {
-  // 去掉不合法的字符
-  let cleaned = title.replace(/[\\/:"*?<>|]|[\x00-\x1f]/g, "");
-
-  // 空白折叠
-  cleaned = cleaned.replace(/\s+/g, "-");
-
-  // 截断到 60 个字符
-  cleaned = cleaned.substring(0, 60);
-
-  // 去掉首尾的 -
-  cleaned = cleaned.replace(/^-+|-+$/g, "");
-
-  return cleaned;
 }
 
 /**
@@ -64,7 +39,7 @@ export async function writeMaterial(m: NewMaterial): Promise<WrittenMaterial> {
   const id = ulid();
 
   // 清理标题
-  const cleanedTitle = sanitizeTitle(m.title);
+  const cleanedTitle = sanitizeForFilename(m.title, 60);
 
   // 生成文件名
   const filename = cleanedTitle ? `${id}-${cleanedTitle}.md` : `${id}.md`;

@@ -5,13 +5,18 @@
  * 所以它不需要服务在跑、不联网、不问你这条归属于哪份材料。
  */
 import { EmptyQuickNote, appendQuickNote, readQuickNotes } from "../quicknotes/append.js";
+import { readProcessedNoteIds } from "../quicknotes/processed.js";
 
 const args = process.argv.slice(2);
 
 if (args[0] === "--list") {
-  const notes = await readQuickNotes();
+  // 必须减去已处理的那些。quicknotes.jsonl 是追加式的，已归属或已丢弃的行仍在文件里，
+  // 直接数行数会让这个命令一直报「2 条待归属」——一个会骗人的命令比没有命令更糟。
+  const [all, processed] = await Promise.all([readQuickNotes(), readProcessedNoteIds()]);
+  const notes = all.filter((n) => !processed.has(n.id));
   if (notes.length === 0) {
-    console.log("还没有速记。");
+    const tail = processed.size > 0 ? `（已处理 ${processed.size} 条）` : "";
+    console.log(`没有待归属的速记。${tail}`);
   } else {
     console.log(`${notes.length} 条待归属的速记：\n`);
     for (const n of notes) {

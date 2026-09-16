@@ -12,7 +12,7 @@ _Code_: `material` · `materials/` · `writeMaterial` · `buildMaterialsIndex` �
 **标注**:
 本人针对某份**材料**写下的个人理解，可在**收录**之后任意时间追加。
 _Avoid_: 笔记, 评论, 心得, 批注
-_Code_: 尚无实现
+_Code_: `writeAnnotation` · `annotations/` · `NewAnnotation`
 
 **收录**:
 读过一份候选内容后、判定其值得留存并写入库中的动作。
@@ -27,7 +27,7 @@ _Code_: `appendQuickNote` · `QuickNote` · `quicknotes.jsonl`
 **归属**:
 把一条**速记**挂到某一份**材料**上，从而使它成为一条**标注**的动作。
 _Avoid_: 分类, 归类, 打标, 关联, 挂载
-_Code_: 尚无实现（计划为 `POST /api/notes/:id/attach` · `writeAnnotation` · `annotations/`）
+_Code_: `POST /api/notes/:id/attach` · `writeAnnotation` · `annotations/` · `appendNoteProcessed`
 
 **索引页**:
 一个只含目录与元信息、本身不成为**材料**的页面；其价值在于展开出多份**材料**。

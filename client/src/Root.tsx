@@ -1,0 +1,77 @@
+import { useState, useCallback } from "react";
+import { App } from "./App.js";
+import { Attach } from "./Attach.js";
+
+type View = "过闸" | "归属";
+
+/**
+ * 顶层视图切换。
+ *
+ * 两个视图都常驻挂载、用 display 隐藏，不做条件渲染：过闸视图持有一条 SSE 连接和
+ * 一批抓取进度，切走再切回若重新挂载就全丢了，而重抓可能触发限流。
+ *
+ * 「归属」标签上的待办计数是这个库的读路径之一：召回靠认出来，
+ * 队列静默增长正是 ADR-0009 点名的失效模式，所以它必须一直看得见。
+ */
+export function Root() {
+  const [view, setView] = useState<View>("过闸");
+  const [pending, setPending] = useState<number | null>(null);
+
+  // 必须 memo：Attach 的加载 effect 依赖这个回调，每次渲染换一个新函数会导致
+  // 「回调变 → 重新拉取 → setState → 重新渲染」的死循环。
+  const handlePendingCount = useCallback((n: number) => setPending(n), []);
+
+  const tab = (name: View, badge?: number | null) => (
+    <button
+      key={name}
+      onClick={() => setView(name)}
+      style={{
+        padding: "8px 18px",
+        border: "none",
+        borderBottom: view === name ? "2px solid #007bff" : "2px solid transparent",
+        backgroundColor: "transparent",
+        color: view === name ? "#007bff" : "#666",
+        fontWeight: view === name ? 600 : 400,
+        cursor: "pointer",
+        fontSize: "15px",
+      }}
+    >
+      {name}
+      {badge !== null && badge !== undefined && badge > 0 && (
+        <span
+          style={{
+            marginLeft: "8px",
+            padding: "1px 7px",
+            borderRadius: "10px",
+            backgroundColor: "#ff9800",
+            color: "white",
+            fontSize: "12px",
+          }}
+        >
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+
+  return (
+    <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
+      <div style={{ display: "flex", gap: "4px", borderBottom: "1px solid #ddd", marginBottom: "20px" }}>
+        {tab("过闸")}
+        {tab("归属", pending)}
+      </div>
+
+      <div style={{ display: view === "过闸" ? "block" : "none" }}>
+        <App />
+      </div>
+      <div style={{ display: view === "归属" ? "block" : "none", padding: "0 20px" }}>
+        <h1 style={{ marginBottom: "6px" }}>Zhandao 归属</h1>
+        <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
+          把一条<strong>速记</strong>挂到某份<strong>材料</strong>上，它就成了一条<strong>标注</strong>。
+          候选是 BM25 直出的前三个，不调模型。
+        </p>
+        <Attach active={view === "归属"} onPendingCount={handlePendingCount} />
+      </div>
+    </div>
+  );
+}
