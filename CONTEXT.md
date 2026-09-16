@@ -7,7 +7,7 @@
 **材料**:
 从外部获取、经本人判读后决定留存的一份内容；正文是来源原文不可改，标题是本人给的标识可改。
 _Avoid_: 笔记, 文章, 文档, 资料
-_Code_: `material` · `materials/` · `writeMaterial`
+_Code_: `material` · `materials/` · `writeMaterial` · `buildMaterialsIndex` · `searchMaterials`
 
 **标注**:
 本人针对某份**材料**写下的个人理解，可在**收录**之后任意时间追加。

@@ -10,6 +10,7 @@
     "dev": "concurrently \"npm --workspace server run dev\" \"npm --workspace client run dev\"",
     "typecheck": "npm --workspace server run typecheck && npm --workspace client run typecheck",
     "test": "npm --workspace server run test",
+    "search": "npm --workspace server run search --",
     "note": "npm --workspace server run note --"
   },
   "devDependencies": {
