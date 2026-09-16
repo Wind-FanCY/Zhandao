@@ -88,15 +88,20 @@ grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src | grep -v test 
   一体化框架（Next.js / SvelteKit）已被明确否决，不要提议迁移——先读 ADR-0007。
   必须用单条 `npm run dev` 同时拉起前后端，否则违反 ADR-0002 的启动摩擦约束。
 - **模型调用**：`server/src/model/` 是**唯一**知道用哪家服务商的地方。
-  现在是 Claude（`claude-opus-5`，简单任务用 `effort: low`——省的是延迟不是钱）。
-  **为什么只有一家却单独关一个目录**：本人的 Claude 是学校组织账号、成本可忽略，
-  但毕业后可能换 DeepSeek。换服务商=改这里的函数体，调用方一行不动。
+  现在是 **DeepSeek**（`deepseek-flash`，走 OpenAI 兼容接口 `https://api.deepseek.com`）。
+  **为什么只有一家却单独关一个目录**——这条已被实战检验过一次：原本选的是 Claude，
+  但学校组织账号的 API key 未绑定 workspace，调任何接口都返回 400
+  （要求 `anthropic-workspace-id` 头），而本人无权新建 key。换成 DeepSeek 的
+  **实际改动范围就是这一个文件**，调用方一行未动。
+  **DeepSeek 与 Anthropic 的三处实质差异**（依官方文档，别照搬 OpenAI 的通用写法）：
+  ① OpenAI 兼容接口 + `baseURL`；② **没有严格 JSON Schema**，只有
+  `response_format: {type:"json_object"}`，schema 校验得自己用 zod 兜；
+  ③ 文档明示「API 可能偶尔返回空内容」——已按此重试一次，两次都空就返回空数组，
+  不让关键词缺失拖垮整条收录流程。
   **刻意没有造 `interface ModelProvider`**：目前只有一个调用点，基于一个调用点设计的
   接口形状大概率要重做（将来的查询改写要不要流式？出题要不要 tool use？都还不知道）。
   等调用点长到三个以上、能看出共同形状时再抽。
-  **凭证坑（实测）**：组织级 API key（未绑定 workspace）调任何接口都返回 400，
-  要求带 `anthropic-workspace-id` 头。代码支持 `ANTHROPIC_WORKSPACE_ID` 环境变量；
-  更干净的做法是换一个绑定到 workspace 的 key。
+  凭证放 `code/.env` 的 `DEEPSEEK_API_KEY`（`.env` 已被 gitignore，而本仓库是公开的）。
 - **Agent**：**自己写 agent 循环**。不要引入 DeepSeek Harness、LangChain 之类的 harness/框架——本项目的目的之一就是学 agent 怎么工作，把循环抽象掉就学不到了。模型本身随意，DeepSeek 可用。
 - **RAG 分四阶段推进，每阶段对基线量化**：
   1. BM25 检索 → 生成，拿到基线 —— **已完成**。`npm run eval` 是长期存在的尺子。

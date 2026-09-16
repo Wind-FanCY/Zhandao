@@ -1,21 +1,26 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import OpenAI from "openai";
 import { z } from "zod";
 
 /**
- * 本文件是**唯一**知道「我们在用 Claude」的地方。
+ * 本文件是**唯一**知道用哪家模型服务商的地方。当前：DeepSeek。
  *
- * 为什么不造 `interface ModelProvider`：现在只有一个调用点，基于一个调用点设计的接口
- * 形状大概率要重做——将来的查询改写要不要流式？出题要不要 tool use？都还不知道。
- * 换服务商（比如毕业后换 DeepSeek）就改这个文件的函数体，调用方一行不动。
- * 等调用点长到三个以上、能看出共同形状时，再把 provider 层抽出来。
+ * 为什么不造 `interface ModelProvider`：目前只有一个调用点，基于一个调用点设计的
+ * 接口形状大概率要重做——将来的查询改写要不要流式？出题要不要 tool use？都还不知道。
+ * 换服务商就改这个文件的函数体，调用方一行不动。这条设计刚被实战检验过一次：
+ * 原本用 Claude，因学校组织账号的 key 无法绑定 workspace（调任何接口都 400）而换成
+ * DeepSeek——改动范围就是这一个文件。
+ *
+ * DeepSeek 与 Claude 的三处实质差异（依官方文档，不是照搬 OpenAI 的写法）：
+ *   1. 走 OpenAI 兼容接口，`baseURL: https://api.deepseek.com`
+ *   2. **没有严格 JSON Schema**，只有 `response_format: {type:"json_object"}`。
+ *      所以 schema 校验必须我们自己做——下面用 zod 兜。
+ *   3. 文档明示「API 可能偶尔返回空内容」。这是它自己写下的坑，必须处理。
  */
 
-const KeywordsSchema = z.object({
-  keywords: z
-    .array(z.string())
-    .describe("中文检索关键词，5 到 10 个，按重要性降序"),
-});
+const MODEL = "deepseek-flash";
+const BASE_URL = "https://api.deepseek.com";
+
+const KeywordsSchema = z.object({ keywords: z.array(z.string()) });
 
 /** 中文字符占比。低于此阈值视为「纯英文材料」，需要补中文关键词。 */
 const CJK_RATIO_THRESHOLD = 0.05;
@@ -33,55 +38,62 @@ export function needsChineseKeywords(text: string): boolean {
 export class MissingApiKey extends Error {}
 
 /**
- * 给一份纯英文**材料**生成中文检索关键词。
- *
- * 注意 prompt 的取向：要的**不是**「把标题译成中文」，而是
- * 「一个中文用户想找这篇内容时会敲什么词」——因为这些关键词的唯一用途是进检索索引，
- * 补上中文查询命中纯英文材料时的那个 0%（见 CLAUDE.md 的实测基线）。
+ * DeepSeek 的 JSON 模式有两条硬性要求（文档原文）：prompt 里必须出现 "json" 字样，
+ * 且必须给出期望格式的示例。缺任何一条都可能拿不到合法 JSON。
  */
+const SYSTEM_PROMPT = [
+  "你在为一个中文使用者的个人知识库建检索索引。",
+  "给定一篇英文技术材料，输出这个人日后想找回这篇内容时最可能敲进搜索框的中文词。",
+  "要贴近口语和实际提问方式，不要逐字翻译标题；专有名词（API 名、库名）保留英文原形。",
+  "以 json 格式输出，5 到 10 个关键词，按重要性降序。格式示例：",
+  '{"keywords": ["服务端推送", "EventSource", "事件流格式", "断线重连"]}',
+].join("\n");
+
 export async function generateChineseKeywords(
   title: string,
   markdown: string,
 ): Promise<string[]> {
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
-    throw new MissingApiKey("未设置 ANTHROPIC_API_KEY，请写入 code/.env");
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    throw new MissingApiKey("未设置 DEEPSEEK_API_KEY，请写入 code/.env");
   }
 
-  // 组织级（未绑定 workspace）的 API key 必须带 anthropic-workspace-id 头，
-  // 否则 messages 接口返回 400。绑定到 workspace 的 key 不需要这个头。
-  const workspaceId = process.env.ANTHROPIC_WORKSPACE_ID;
-  const client = new Anthropic(
-    workspaceId ? { defaultHeaders: { "anthropic-workspace-id": workspaceId } } : {},
-  );
+  const client = new OpenAI({ apiKey, baseURL: BASE_URL });
 
-  const response = await client.messages.parse({
-    model: "claude-opus-5",
-    max_tokens: 4096,
-    // 关键词提取不是推理任务，低 effort 省的是延迟不是钱
-    output_config: { effort: "low", format: zodOutputFormat(KeywordsSchema) },
-    system:
-      "你在为一个中文使用者的个人知识库建检索索引。给定一篇英文技术材料，" +
-      "输出这个人日后想找回这篇内容时最可能敲进搜索框的中文词。" +
-      "要贴近口语和实际提问方式，不要逐字翻译标题；" +
-      "专有名词（API 名、库名）保留英文原形。",
-    messages: [
-      {
-        role: "user",
-        content: `标题：${title}\n\n正文：\n${markdown}`,
-      },
-    ],
-  });
+  // 文档明示可能返回空内容，故重试一次；两次都空就认了，返回空数组而不抛异常——
+  // 关键词缺失只会让检索差一点，不该让整条收录流程失败。
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const completion = await client.chat.completions.create({
+      model: MODEL,
+      max_tokens: 1024,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `标题：${title}\n\n正文：\n${markdown}` },
+      ],
+    });
 
-  const parsed = response.parsed_output;
-  if (!parsed) return [];
-  // 去重、去空白、保序
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const k of parsed.keywords) {
-    const t = k.trim();
-    if (t.length === 0 || seen.has(t)) continue;
-    seen.add(t);
-    out.push(t);
+    const content = completion.choices[0]?.message?.content?.trim();
+    if (!content) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      continue; // 不是合法 JSON，再试一次
+    }
+    const result = KeywordsSchema.safeParse(parsed);
+    if (!result.success) continue;
+
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const k of result.data.keywords) {
+      const t = k.trim();
+      if (t.length === 0 || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+    if (out.length > 0) return out;
   }
-  return out;
+  return [];
 }
