@@ -12,7 +12,8 @@
     "test": "npm --workspace server run test",
     "search": "npm --workspace server run search --",
     "note": "npm --workspace server run note --",
-    "eval": "npm --workspace server run eval"
+    "eval": "npm --workspace server run eval",
+    "keywords": "npm --workspace server run keywords --"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"

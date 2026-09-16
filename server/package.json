@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts' 'src/*.test.ts'",
     "note": "tsx src/scripts/note.ts",
-    "eval": "tsx src/scripts/eval.ts"
+    "eval": "tsx src/scripts/eval.ts",
+    "keywords": "tsx src/scripts/backfill-keywords.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

@@ -86,9 +86,16 @@ function parseMaterialFile(
   }
 
   const fm = frontmatter as Record<string, unknown>;
-  const id = fm.id as string | undefined;
-  const title = fm.title as string | undefined;
-  const source = fm.source as string | undefined;
+  // 用 typeof 收窄而非 `as string`：YAML 里 `id: 123` 会被解析成数字，
+  // `as string` 只是断言、拦不住它，后面的真值检查也放它过去。
+  const id = typeof fm.id === "string" ? fm.id : undefined;
+  const title = typeof fm.title === "string" ? fm.title : undefined;
+  const source = typeof fm.source === "string" ? fm.source : undefined;
+  // 中文检索关键词（可选）。它存在的理由：中文查询命中纯英文材料的 recall@3
+  // 实测为 0%，靠这些关键词补上——见 CLAUDE.md 的基线一节。
+  const keywordsZh = Array.isArray(fm.keywords_zh)
+    ? fm.keywords_zh.filter((k): k is string => typeof k === "string")
+    : [];
 
   if (!id || !title || !source) {
     console.warn(
@@ -110,8 +117,8 @@ function parseMaterialFile(
   }
   const markdown = markdownLines.join("\n");
 
-  // 索引文本 = 标题 + 正文
-  const indexText = `${title}\n\n${markdown}`;
+  // 索引文本 = 标题 + 中文关键词 + 正文
+  const indexText = [title, keywordsZh.join(" "), markdown].filter(Boolean).join("\n\n");
 
   return [
     {
