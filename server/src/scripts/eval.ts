@@ -7,7 +7,7 @@
  * 评估集在 `data/eval/retrieval.jsonl`——它编码「什么算对」，属于本人的判断，
  * 因此住在数据仓库而非代码仓库。
  */
-import { evaluate, evaluateByLanguage, readEvalSet } from "../search/eval.js";
+import { evaluate, evaluateByLanguage, evaluateByOrigin, readEvalSet } from "../search/eval.js";
 import { initializeProxyAgent } from "../runtime.js";
 
 initializeProxyAgent();
@@ -29,6 +29,13 @@ console.log(`          排名 ${JSON.stringify(overall.ranks)}\n`);
 console.log("按目标材料语言分组（聚合指标会掩盖跨语言 gap，见 CLAUDE.md）：");
 for (const { group, result } of await evaluateByLanguage(cases)) {
   console.log(`  ${group}  ${fmt(result)}  排名 ${JSON.stringify(result.ranks)}`);
+}
+
+console.log("\n按查询来源分组（这份评估集最大的偏差是「查询是我猜的」）：");
+for (const { group, result } of await evaluateByOrigin(cases)) {
+  // 少于 5 条时任何差距都在噪音里，标出来免得被当成结论
+  const warn = result.total < 5 ? "   ← 样本太少，只看趋势" : "";
+  console.log(`  ${group}  ${fmt(result)}${warn}`);
 }
 
 if (overall.misses.length > 0) {
