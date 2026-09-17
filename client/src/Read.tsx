@@ -298,7 +298,19 @@ export function Read({ active }: { active: boolean }) {
         )}
         {/* overscrollBehavior: contain 断掉滚动链：不加的话列表滚到底之后，
             滚轮会继续滚外层——而正文那一栏很长，那次滚动要重绘大量 pre-wrap 文本。 */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain" }}>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            // contain: paint 告诉浏览器这个盒子内部的重绘不会影响外面，
+            // 滚动时的重绘范围被限死在这 300px 宽的框里。
+            // 刻意不用 will-change: transform——那会永久占一个合成层，
+            // 而这里只有 46 个按钮，用不上那么重的手段。
+            contain: "paint",
+          }}
+        >
           {pool.length === 0 && (
             <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>
               没有待处理的<strong>材料</strong>——都消化过了。
