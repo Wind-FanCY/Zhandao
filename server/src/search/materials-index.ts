@@ -20,6 +20,19 @@ export interface IndexedMaterial {
   title: string;
   source: string;
   path: string;
+  /**
+   * 收录时刻，ISO 8601。推送链路用它给**孤岛**排序（见 push/pool.ts）。
+   *
+   * **可选**：它只影响推送顺序，与检索无关。曾经把它列为必需字段，
+   * 结果是「手改材料时误删这一行 → 整篇从检索里静默消失」——
+   * 而 warn 只打在 dev server 控制台，那不是本人会去看的地方。
+   * 一个排序字段不该有能力让材料搜不到。
+   */
+  captured?: string;
+  /** 展开出这份材料的**索引页** URL，事实字段，非每份材料都有（ADR-0010） */
+  from?: string;
+  /** 正文全文（frontmatter 之后的部分），供阅读视图展示——BM25 索引另算 indexText，不占用这份 */
+  markdown: string;
 }
 
 export interface MaterialsIndex {
@@ -91,12 +104,17 @@ function parseMaterialFile(
   const id = typeof fm.id === "string" ? fm.id : undefined;
   const title = typeof fm.title === "string" ? fm.title : undefined;
   const source = typeof fm.source === "string" ? fm.source : undefined;
+  const captured = typeof fm.captured === "string" ? fm.captured : undefined;
+  // from 是事实字段（ADR-0010：哪个索引页展开了我），非每份材料都有，可选
+  const from = typeof fm.from === "string" ? fm.from : undefined;
   // 中文检索关键词（可选）。它存在的理由：中文查询命中纯英文材料的 recall@3
   // 实测为 0%，靠这些关键词补上——见 CLAUDE.md 的基线一节。
   const keywordsZh = Array.isArray(fm.keywords_zh)
     ? fm.keywords_zh.filter((k): k is string => typeof k === "string")
     : [];
 
+  // 必需字段只有这三个：没有 id 无法被引用、没有 title 在列表里认不出、
+  // 没有 source 就不是「从外部获取」的材料。captured 缺失只影响推送排序，不拦检索。
   if (!id || !title || !source) {
     console.warn(
       `[search] 文件 ${filepath} 的 frontmatter 缺少必需字段 (id=${id}, title=${title}, source=${source})`,
@@ -126,6 +144,9 @@ function parseMaterialFile(
       title,
       source,
       path: filepath,
+      captured,
+      from,
+      markdown,
     },
     indexText,
   ];

@@ -22,12 +22,12 @@ _Code_: `POST /api/inbox/keep` · `appendProcessed` · `decision: kept`
 **留档**:
 读完一份**材料**后判定无可**标注**、但仍值得留在库中的动作。
 _Avoid_: 已读, 跳过, 略过, 存档, 收藏
-_Code_: 尚无实现（计划为 `materials-read.jsonl` · `appendArchived`）
+_Code_: `appendArchived` · `materials-read.jsonl` · `POST /api/materials/:id/archive`
 
 **孤岛**:
 没有任何**标注**指向、自己也没发出过**标注**、且未经**留档**的**材料**——即从没碰过的那些。
 _Avoid_: 未读, 待处理, 僵尸材料, 死材料
-_Code_: 尚无实现
+_Code_: `computePool` · `PoolKind` · `GET /api/materials/pool`
 
 **速记**:
 本人当场记下、尚未归属到任何**材料**的一句话；它还不是**标注**。

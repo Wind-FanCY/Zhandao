@@ -10,9 +10,13 @@ import { readQuickNotes } from "./quicknotes/append.js";
 import { appendNoteProcessed, readProcessedNoteIds } from "./quicknotes/processed.js";
 import { cacheDistilledQuery, readCachedQuery } from "./quicknotes/query-cache.js";
 import { writeAnnotation, EmptyAnnotation, MissingHostMaterial } from "./annotations/write.js";
+import { readAnnotations } from "./annotations/read.js";
 import { buildMaterialsIndex, searchMaterials, getMaterial, listMaterials } from "./search/materials-index.js";
 import { distillQuery, QueryDistillFailed } from "./model/distill-query.js";
 import { MissingApiKey } from "./model/keywords.js";
+import { appendArchived } from "./materials/archive.js";
+import { dropMaterial, MaterialNotFound } from "./materials/drop.js";
+import { computePool, pickForPush } from "./push/pool.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -458,6 +462,190 @@ export function createApp(
       }));
       res.json({ materials });
     } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/materials/pool
+   * 当前推送池的完整列表（孤岛在前、留档在后，各自按 since 升序），
+   * 供阅读视图浏览「还有哪些材料等着」——不止今天推的那一篇。
+   *
+   * 路由必须注册在 `GET /api/materials/:id` 之前：否则 "pool" 会被当成 :id 吃掉。
+   */
+  app.get("/api/materials/pool", async (req: Request, res: Response) => {
+    try {
+      const pool = await computePool();
+      res.json({
+        candidates: pool.map((c) => ({
+          id: c.material.id,
+          title: c.material.title,
+          source: c.material.source,
+          kind: c.kind,
+          since: c.since,
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/push/today
+   * 今天该推的那一篇材料（孤岛优先，其次留档最早）。
+   * `candidate: null` 是合法结果——池子空了，或池首是今天刚留档的（同日去重）。
+   */
+  app.get("/api/push/today", async (req: Request, res: Response) => {
+    try {
+      const picked = await pickForPush();
+      if (!picked) {
+        return res.json({ candidate: null });
+      }
+      res.json({
+        candidate: {
+          id: picked.material.id,
+          title: picked.material.title,
+          source: picked.material.source,
+          kind: picked.kind,
+          since: picked.since,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/materials/:id
+   * 一份材料的全文（不裁剪）+ 挂在它上面的全部标注（按 at 升序）。
+   * 阅读视图打开一篇待处理的材料时用这个端点。
+   */
+  app.get("/api/materials/:id", async (req: Request, res: Response) => {
+    try {
+      const materialId = req.params.id;
+      // Express 的 params 类型允许 string[]（通配符路由才会出现），typeof 收窄而非断言
+      if (typeof materialId !== "string") {
+        return res.status(404).json({ error: "Material not found" });
+      }
+
+      const [index, annotations] = await Promise.all([buildMaterialsIndex(), readAnnotations()]);
+      const material = getMaterial(index, materialId);
+      if (!material) {
+        return res.status(404).json({ error: `Material ${materialId} not found` });
+      }
+
+      const hosted = annotations
+        .filter((a) => a.material === materialId)
+        .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+        .map((a) => ({ id: a.id, text: a.text, at: a.at }));
+
+      res.json({
+        id: material.id,
+        title: material.title,
+        source: material.source,
+        captured: material.captured,
+        from: material.from,
+        markdown: material.markdown,
+        annotations: hosted,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/materials/:id/archive
+   * **留档**：读完判定无可标注、但仍值得留在库中。允许对同一材料重复留档
+   * （追加一条新记录）——`readArchivedIds` 只取最早那次用于排序，见 materials/archive.ts。
+   *
+   * Response: { "ok": true } (201)；材料不存在 404
+   */
+  app.post("/api/materials/:id/archive", async (req: Request, res: Response) => {
+    try {
+      const materialId = req.params.id;
+      if (typeof materialId !== "string") {
+        return res.status(404).json({ error: "Material not found" });
+      }
+
+      const index = await buildMaterialsIndex();
+      if (!getMaterial(index, materialId)) {
+        return res.status(404).json({ error: `Material ${materialId} not found` });
+      }
+
+      await appendArchived({ materialId, at: new Date().toISOString() });
+      return res.status(201).json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/materials/:id/drop
+   * 划掉一份材料：删文件 + 记日志。
+   *
+   * Response: { "ok": true } (200)；材料不存在 404
+   */
+  app.post("/api/materials/:id/drop", async (req: Request, res: Response) => {
+    try {
+      const materialId = req.params.id;
+      if (typeof materialId !== "string") {
+        return res.status(404).json({ error: "Material not found" });
+      }
+
+      await dropMaterial(materialId);
+      return res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof MaterialNotFound) {
+        return res.status(404).json({ error: err.message });
+      }
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/materials/:id/annotate
+   * 阅读视图里直接对当前材料写一条标注——宿主已知（就是这篇材料），不需要走
+   * **归属**（速记 → 候选宿主 → 挑一个）那条路径；这是产生标注的第二条路径，并存不冲突。
+   *
+   * Request body: { "text": string }
+   * Response: { "annotationId": "...", "path": "..." } (201)
+   *   text 为空 → 400；材料不存在 → 400（说清是宿主不存在，与 /api/notes/:id/attach 一致）
+   */
+  app.post("/api/materials/:id/annotate", async (req: Request, res: Response) => {
+    try {
+      const materialId = req.params.id;
+      if (typeof materialId !== "string") {
+        return res.status(400).json({ error: "Missing material id" });
+      }
+
+      // 手写 typeof 收窄读 body 字段，不用 `as` 断言——外部输入不可信
+      const body: unknown = req.body;
+      let text: string | undefined;
+      if (typeof body === "object" && body !== null) {
+        if ("text" in body && typeof body.text === "string") text = body.text;
+      }
+
+      if (text === undefined || !text.trim()) {
+        return res.status(400).json({ error: "Missing or empty text" });
+      }
+
+      const index = await buildMaterialsIndex();
+      if (!getMaterial(index, materialId)) {
+        return res.status(400).json({ error: `Host material ${materialId} not found` });
+      }
+
+      const written = await writeAnnotation({ materialId, text });
+      return res.status(201).json({ annotationId: written.id, path: written.path });
+    } catch (err) {
+      if (err instanceof EmptyAnnotation || err instanceof MissingHostMaterial) {
+        return res.status(400).json({ error: err.message });
+      }
       const message = err instanceof Error ? err.message : "Unknown error";
       return res.status(500).json({ error: message });
     }

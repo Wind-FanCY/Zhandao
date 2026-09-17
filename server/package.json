@@ -11,7 +11,8 @@
     "note": "tsx src/scripts/note.ts",
     "eval": "tsx src/scripts/eval.ts",
     "keywords": "tsx src/scripts/backfill-keywords.ts",
-    "expand": "tsx src/scripts/expand-index-page.ts"
+    "expand": "tsx src/scripts/expand-index-page.ts",
+    "push": "tsx src/scripts/push.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

@@ -1,8 +1,9 @@
 import { useState, useCallback } from "react";
 import { App } from "./App.js";
 import { Attach } from "./Attach.js";
+import { Read } from "./Read.js";
 
-type View = "过闸" | "归属";
+type View = "阅读" | "过闸" | "归属";
 
 /**
  * 顶层视图切换。
@@ -14,7 +15,9 @@ type View = "过闸" | "归属";
  * 队列静默增长正是 ADR-0009 点名的失效模式，所以它必须一直看得见。
  */
 export function Root() {
-  const [view, setView] = useState<View>("过闸");
+  // 默认落在「阅读」：推送循环的日常动作在这儿，而**收录**（要先去浏览器加书签）
+  // 和**归属**（要先有速记）都是间歇性的。
+  const [view, setView] = useState<View>("阅读");
   const [pending, setPending] = useState<number | null>(null);
 
   // 必须 memo：Attach 的加载 effect 依赖这个回调，每次渲染换一个新函数会导致
@@ -57,8 +60,20 @@ export function Root() {
   return (
     <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
       <div style={{ display: "flex", gap: "4px", borderBottom: "1px solid #ddd", marginBottom: "20px" }}>
+        {tab("阅读")}
         {tab("过闸")}
         {tab("归属", pending)}
+      </div>
+
+      {/* 「阅读」刻意不带数字徽标：待处理几十篇这个数字每天糊在眼前，
+          就是开放项里那条「不会每次打开都像在骂自己」要避免的东西。 */}
+      <div style={{ display: view === "阅读" ? "block" : "none", padding: "0 20px" }}>
+        <h1 style={{ marginBottom: "6px" }}>Zhandao 阅读</h1>
+        <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
+          读一篇<strong>材料</strong>，然后走三个终态之一：写<strong>标注</strong>、
+          <strong>留档</strong>（读完没什么可写）、或划掉。
+        </p>
+        <Read active={view === "阅读"} />
       </div>
 
       <div style={{ display: view === "过闸" ? "block" : "none" }}>
