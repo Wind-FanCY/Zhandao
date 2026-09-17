@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/rayfang/Desktop/wind-Fancy/Zhandao/code && npm run --silent push -- --once-per-day --dry-run",
+            "timeout": 30,
+            "statusMessage": "查今天该读哪篇材料"
+          }
+        ]
+      }
+    ]
+  }
+}

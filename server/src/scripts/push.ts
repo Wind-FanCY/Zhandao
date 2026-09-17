@@ -1,5 +1,11 @@
 /**
- * 推送触发脚本：`npm run push`（加 `--dry-run` 只打印，不发通知）。
+ * 推送触发脚本：`npm run push`
+ *   `--dry-run`       只打印，不发通知
+ *   `--once-per-day`  今天已经提示过就**一个字都不输出**、直接退出
+ *
+ * `--once-per-day` 是给 Claude Code 的 `SessionStart` hook 用的：它每开一个会话
+ * 就触发一次，一天可能好几次，而同一行反复出现是噪音。
+ * **默认行为刻意不去重**——手动敲 `npm run push` 就该永远给答案。
  *
  * ADR-0004：由 launchd 到点唤醒这个小脚本，它读数据、算出今天该推哪一篇、
  * 发一条系统通知、退出——**不起常驻进程、不拉起 Web 服务、不碰模型**。
@@ -14,6 +20,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pickForPush } from "../push/pool.js";
 import { initializeRuntime } from "../runtime.js";
+import { alreadyShownToday, markShownToday } from "../push/shown.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,12 +41,21 @@ async function sendNotification(title: string, body: string): Promise<void> {
 async function main(): Promise<void> {
   initializeRuntime();
 
-  const dryRun = process.argv.slice(2).includes("--dry-run");
+  const args = process.argv.slice(2);
+  const dryRun = args.includes("--dry-run");
+  const oncePerDay = args.includes("--once-per-day");
+
+  // hook 场景下必须完全静默：SessionStart 的输出会进对话上下文，
+  // 打一行「今天已提示过」本身就是它要消掉的那种噪音。
+  if (oncePerDay && (await alreadyShownToday())) return;
 
   const candidate = await pickForPush();
 
   if (!candidate) {
-    console.log("今天没有要推的。");
+    // 「今天没有」是合法输出，但 hook 场景下也不该出声
+    if (!oncePerDay) console.log("今天没有要推的。");
+    // 仍然记一天：池子空的话，今天再问几次也是空
+    if (oncePerDay) await markShownToday();
     return;
   }
 
@@ -50,11 +66,13 @@ async function main(): Promise<void> {
 
   if (dryRun) {
     console.log("\n[dry-run] 不发通知。");
+    if (oncePerDay) await markShownToday();
     return;
   }
 
   await sendNotification("Zhandao", `${kind}：${material.title}`);
   console.log("\n已发送系统通知。");
+  if (oncePerDay) await markShownToday();
 }
 
 main().catch((err) => {
