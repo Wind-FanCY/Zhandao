@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import type { CSSProperties, ReactElement } from "react";
 
 /**
@@ -120,12 +120,62 @@ function renderBody(markdown: string): ReactElement[] {
   });
 }
 
+/**
+ * 笔记输入框单独成组件、自己管自己的 state。
+ *
+ * 原先 `noteText` 放在 `Read` 里，于是**每敲一个键都会重渲染整篇正文**——
+ * 而正文被 renderBody 切成「围栏数 + 1」个块，库里最极端的一篇有 244 个围栏、
+ * 也就是 245 个块，是其余材料的 9 倍。左边 46 个按钮也一起跟着重渲染。
+ * 拆出来之后打字完全不触及 Read。
+ */
+function NoteEditor({ busy, onSubmit }: { busy: boolean; onSubmit: (text: string) => void }) {
+  const [text, setText] = useState("");
+  const empty = text.trim().length === 0;
+  return (
+    <>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="读完有什么理解？写一句就够——这才是这个库唯一值钱的东西"
+        rows={3}
+        style={{
+          width: "100%",
+          fontFamily: "inherit",
+          fontSize: "15px",
+          lineHeight: 1.6,
+          padding: "10px",
+          border: "1px solid #ccc",
+          borderRadius: "4px",
+          resize: "vertical",
+        }}
+      />
+      <button
+        onClick={() => {
+          onSubmit(text);
+          setText("");
+        }}
+        disabled={busy || empty}
+        style={{
+          padding: "8px 18px",
+          marginTop: "10px",
+          backgroundColor: busy || empty ? "#ccc" : "#4caf50",
+          color: "white",
+          border: "none",
+          borderRadius: "4px",
+          cursor: busy || empty ? "not-allowed" : "pointer",
+        }}
+      >
+        写标注
+      </button>
+    </>
+  );
+}
+
 export function Read({ active }: { active: boolean }) {
   const [pool, setPool] = useState<PoolItem[] | null>(null);
   const [todayId, setTodayId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
-  const [noteText, setNoteText] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmDrop, setConfirmDrop] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,7 +213,6 @@ export function Read({ active }: { active: boolean }) {
   const open = async (id: string) => {
     setOpenId(id);
     setDetail(null);
-    setNoteText("");
     setConfirmDrop(false);
     setDone(null);
     try {
@@ -200,7 +249,6 @@ export function Read({ active }: { active: boolean }) {
         setDetail(null);
         setOpenId(null);
       } else if (path === "annotate") {
-        setNoteText("");
         await open(openId);
       }
     } catch (err) {
@@ -210,6 +258,10 @@ export function Read({ active }: { active: boolean }) {
       setConfirmDrop(false);
     }
   };
+
+  // memo 化：引用不变时 React 会跳过整棵子树的重渲染。
+  // 依赖只有 detail——正文不可改（CONTEXT.md：材料正文是来源原文不可改）。
+  const body = useMemo(() => (detail === null ? null : renderBody(detail.markdown)), [detail]);
 
   if (error !== null && pool === null) {
     return <div style={{ padding: "20px", color: "#c33" }}>错误：{error}</div>;
@@ -325,33 +377,8 @@ export function Read({ active }: { active: boolean }) {
 
             {/* 三个终态的控件都在默认视图里——决定所需的控件藏起来就等于不存在 */}
             <div style={{ borderTop: "1px solid #eee", paddingTop: "14px", marginBottom: "18px" }}>
-              <textarea
-                value={noteText}
-                onChange={(e) => setNoteText(e.target.value)}
-                placeholder="读完有什么理解？写一句就够——这才是这个库唯一值钱的东西"
-                rows={3}
-                style={{
-                  width: "100%",
-                  fontFamily: "inherit",
-                  fontSize: "15px",
-                  lineHeight: 1.6,
-                  padding: "10px",
-                  border: "1px solid #ccc",
-                  borderRadius: "4px",
-                  resize: "vertical",
-                }}
-              />
+              <NoteEditor busy={busy} onSubmit={(text) => void act("annotate", { text }, "标注已写入")} />
               <div style={{ display: "flex", gap: "10px", marginTop: "10px", alignItems: "center" }}>
-                <button
-                  onClick={() => void act("annotate", { text: noteText }, "标注已写入")}
-                  disabled={busy || noteText.trim().length === 0}
-                  style={{
-                    ...btn("#4caf50"),
-                    backgroundColor: busy || noteText.trim().length === 0 ? "#ccc" : "#4caf50",
-                  }}
-                >
-                  写标注
-                </button>
                 <button onClick={() => void act("archive", undefined, "已留档")} disabled={busy} style={btn("#ff9800")}>
                   留档（没什么可写）
                 </button>
@@ -379,7 +406,7 @@ export function Read({ active }: { active: boolean }) {
               )}
             </div>
 
-            <div style={{ borderTop: "1px solid #eee", paddingTop: "14px" }}>{renderBody(detail.markdown)}</div>
+            <div style={{ borderTop: "1px solid #eee", paddingTop: "14px" }}>{body}</div>
           </div>
         )}
       </div>
