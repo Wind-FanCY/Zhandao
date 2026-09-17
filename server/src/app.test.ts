@@ -127,6 +127,35 @@ describe("Express App Routes", () => {
     }
   });
 
+  test("POST /api/inbox/fetch 与 GET /api/inbox 看到的是同一个集合（已处理的都不算）", async () => {
+    // 回归测试。原先 fetch 端点没减去已处理的 URL，于是：
+    // ① 已收录的条目被重抓，其中掘金那三条会去踩已知的限流（空壳页）；
+    // ② 进度分母与可见列表不一致（9 vs 3），界面看起来像卡住了。
+    const { appendProcessed } = await import("./inbox/processed.js");
+    await appendProcessed({
+      url: "https://example.com/page1",
+      decision: "kept",
+      at: new Date().toISOString(),
+      materialId: "01TESTTESTTESTTESTTESTTEST",
+    });
+
+    const listRes = await fetch(`http://localhost:${port}/api/inbox`);
+    const listBody: unknown = await listRes.json();
+    assert.ok(isRecord(listBody));
+    assert.ok(Array.isArray(listBody.entries));
+    assert.strictEqual(listBody.entries.length, 1, "列表应只剩未处理的那条");
+    assert.strictEqual(listBody.filtered, 1, "应报告过滤掉了 1 条");
+
+    const fetchRes = await fetch(`http://localhost:${port}/api/inbox/fetch`, { method: "POST" });
+    const fetchBody: unknown = await fetchRes.json();
+    assert.ok(isRecord(fetchBody));
+    assert.strictEqual(
+      fetchBody.total,
+      1,
+      "抓取的条数必须等于列表条数——不相等就说明两处过滤逻辑又分叉了",
+    );
+  });
+
   test("POST /api/inbox/fetch returns jobId and total", async () => {
     const response = await fetch(`http://localhost:${port}/api/inbox/fetch`, {
       method: "POST",

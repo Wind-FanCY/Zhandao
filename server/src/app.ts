@@ -1,7 +1,7 @@
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
 import cors from "cors";
-import { readInbox, InboxFolderNotFound } from "./inbox/chrome-bookmarks.js";
+import { readInbox, InboxFolderNotFound, type InboxEntry } from "./inbox/chrome-bookmarks.js";
 import { extractArticles, type ExtractResult, type BatchItem } from "./inbox/extract.js";
 import { writeMaterial } from "./materials/write.js";
 import { appendProcessed, readProcessedUrls } from "./inbox/processed.js";
@@ -30,8 +30,6 @@ interface Job {
 }
 
 /** 内存中维护的所有作业 */
-const jobs = new Map<string, Job>();
-let currentJobId: string | null = null;
 
 /** 生成唯一的 jobId */
 function generateJobId(): string {
@@ -72,7 +70,39 @@ function broadcastEvent(job: Job, eventType: string, data: unknown): void {
 }
 
 /** 创建 Express 应用 */
+/**
+ * 读**收件箱**，减去已处理的 URL。
+ *
+ * 抽成函数而不是在两个端点各写一遍：原先 `GET /api/inbox` 过滤了、
+ * `POST /api/inbox/fetch` 忘了过滤，于是抓取会把已**收录**的条目重抓一遍——
+ * 其中三条是掘金，而掘金连续请求会返回空壳页（CLAUDE.md 有实测）。
+ * 也就是说那个 bug 不只是浪费，它主动去踩已知的限流。
+ * 进度分母还会与可见列表不一致（9 vs 3），看起来像卡住了。
+ */
+async function readPendingInbox(inboxBookmarksPath?: string): Promise<{
+  entries: InboxEntry[];
+  matchedFolders: string[];
+  filteredCount: number;
+}> {
+  const [inboxResult, processedUrls] = await Promise.all([
+    readInbox(inboxBookmarksPath),
+    readProcessedUrls(),
+  ]);
+  const entries = inboxResult.entries.filter((entry) => !processedUrls.has(entry.url));
+  return {
+    entries,
+    matchedFolders: inboxResult.matchedFolders,
+    filteredCount: inboxResult.entries.length - entries.length,
+  };
+}
+
 export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): Express {
+
+  // 作业状态必须在 createApp 之内：原先是模块级的，于是所有 app 实例共享同一份，
+  // 测试之间互相污染（一条测试起的作业会被下一条的 POST /fetch 当成「已有作业」返回）。
+  // 生产只有一个 app 所以看不出来，但那是巧合，不是设计。
+  const jobs = new Map<string, Job>();
+  let currentJobId: string | null = null;
   const app = express();
 
   // CORS 中间件：只允许 http://localhost:5173
@@ -92,19 +122,12 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
    */
   app.get("/api/inbox", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const [inboxResult, processedUrls] = await Promise.all([
-        readInbox(inboxBookmarksPath),
-        readProcessedUrls(),
-      ]);
-
-      // 过滤掉已处理的 URL
-      const filtered = inboxResult.entries.filter((entry) => !processedUrls.has(entry.url));
-      const filteredCount = inboxResult.entries.length - filtered.length;
+      const pending = await readPendingInbox(inboxBookmarksPath);
 
       res.json({
-        entries: filtered,
-        matchedFolders: inboxResult.matchedFolders,
-        filtered: filteredCount,
+        entries: pending.entries,
+        matchedFolders: pending.matchedFolders,
+        filtered: pending.filteredCount,
       });
     } catch (err) {
       if (err instanceof InboxFolderNotFound) {
@@ -133,9 +156,9 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
         }
       }
 
-      // 获取收件箱条目
-      const inboxResult = await readInbox(inboxBookmarksPath);
-      const urls = inboxResult.entries.map((e) => e.url);
+      // 只抓未处理的：已**收录**或已划掉的条目重抓毫无用途，还会去踩掘金的限流
+      const pending = await readPendingInbox(inboxBookmarksPath);
+      const urls = pending.entries.map((e) => e.url);
 
       if (urls.length === 0) {
         return res.json({
