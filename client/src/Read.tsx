@@ -278,9 +278,9 @@ export function Read({ active }: { active: boolean }) {
   });
 
   return (
-    <div style={{ display: "flex", gap: "20px", alignItems: "flex-start" }}>
+    <div style={{ display: "flex", gap: "20px", alignItems: "stretch", flex: 1, minHeight: 0 }}>
       {/* 左：可浏览的列表。「界面必须支持浏览，不能只有搜索」 */}
-      <div style={{ width: "300px", flexShrink: 0 }}>
+      <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {todayId !== null && (
           <div
             style={{
@@ -296,7 +296,9 @@ export function Read({ active }: { active: boolean }) {
             今天推送的是下面高亮那篇
           </div>
         )}
-        <div style={{ maxHeight: "72vh", overflowY: "auto" }}>
+        {/* overscrollBehavior: contain 断掉滚动链：不加的话列表滚到底之后，
+            滚轮会继续滚外层——而正文那一栏很长，那次滚动要重绘大量 pre-wrap 文本。 */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain" }}>
           {pool.length === 0 && (
             <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>
               没有待处理的<strong>材料</strong>——都消化过了。
@@ -332,7 +334,7 @@ export function Read({ active }: { active: boolean }) {
       </div>
 
       {/* 右：读 + 三个终态 */}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, overflowY: "auto", overscrollBehavior: "contain", minHeight: 0 }}>
         {openId === null && (
           <div style={{ color: "#999", padding: "20px" }}>从左边选一篇开始读。</div>
         )}

@@ -58,8 +58,11 @@ export function Root() {
   );
 
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
-      <div style={{ display: "flex", gap: "4px", borderBottom: "1px solid #ddd", marginBottom: "20px" }}>
+    // 应用外壳：整体锁在视口高度，让每个视图自己滚。
+    // 原先是文档整体滚动，于是读一篇长文时页面高达 39332px——一往下滚，
+    // 左边那个可浏览列表就滚出视野了，而它正是 CLAUDE.md 要求的读路径。
+    <div style={{ maxWidth: "1200px", margin: "0 auto", height: "calc(100vh - 40px)" /* 减掉 index.css 里 #root 的上下 padding */, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", gap: "4px", borderBottom: "1px solid #ddd", marginBottom: "20px", flexShrink: 0 }}>
         {tab("阅读")}
         {tab("过闸")}
         {tab("归属", pending)}
@@ -67,19 +70,27 @@ export function Root() {
 
       {/* 「阅读」刻意不带数字徽标：待处理几十篇这个数字每天糊在眼前，
           就是开放项里那条「不会每次打开都像在骂自己」要避免的东西。 */}
-      <div style={{ display: view === "阅读" ? "block" : "none", padding: "0 20px" }}>
-        <h1 style={{ marginBottom: "6px" }}>Zhandao 阅读</h1>
-        <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
+      <div
+        style={{
+          display: view === "阅读" ? "flex" : "none",
+          flexDirection: "column",
+          padding: "0 20px",
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
+        <h1 style={{ marginBottom: "6px", flexShrink: 0 }}>Zhandao 阅读</h1>
+        <p style={{ color: "#666", fontSize: "13px", marginBottom: "16px", lineHeight: 1.7, flexShrink: 0 }}>
           读一篇<strong>材料</strong>，然后走三个终态之一：写<strong>标注</strong>、
           <strong>留档</strong>（读完没什么可写）、或划掉。
         </p>
         <Read active={view === "阅读"} />
       </div>
 
-      <div style={{ display: view === "过闸" ? "block" : "none" }}>
+      <div style={{ display: view === "过闸" ? "block" : "none", flex: 1, minHeight: 0, overflowY: "auto" }}>
         <App />
       </div>
-      <div style={{ display: view === "归属" ? "block" : "none", padding: "0 20px" }}>
+      <div style={{ display: view === "归属" ? "block" : "none", padding: "0 20px", flex: 1, minHeight: 0, overflowY: "auto" }}>
         <h1 style={{ marginBottom: "6px" }}>Zhandao 归属</h1>
         <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
           把一条<strong>速记</strong>挂到某份<strong>材料</strong>上，它就成了一条<strong>标注</strong>。
