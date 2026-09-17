@@ -6,6 +6,9 @@
  */
 import { EmptyQuickNote, appendQuickNote, readQuickNotes } from "../quicknotes/append.js";
 import { readProcessedNoteIds } from "../quicknotes/processed.js";
+import { initializeRuntime } from "../runtime.js";
+
+initializeRuntime();
 
 const args = process.argv.slice(2);
 

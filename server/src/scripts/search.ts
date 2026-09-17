@@ -8,6 +8,9 @@
  */
 
 import { buildMaterialsIndex, searchMaterials } from "../search/materials-index.js";
+import { initializeRuntime } from "../runtime.js";
+
+initializeRuntime();
 
 async function main() {
   const args = process.argv.slice(2);

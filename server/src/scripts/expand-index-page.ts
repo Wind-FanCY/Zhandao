@@ -17,8 +17,10 @@
 import { extractArticles, USER_AGENT } from "../inbox/extract.js";
 import { writeMaterial } from "../materials/write.js";
 import { appendProcessed, readProcessedUrls } from "../inbox/processed.js";
-import { initializeProxyAgent } from "../runtime.js";
 import { enumerateSameFolderLinks } from "./index-page-links.js";
+import { initializeRuntime } from "../runtime.js";
+
+initializeRuntime();
 
 /**
  * 抓索引页的原始 HTML（不经 Readability——我们要的是完整 DOM 里的 `<a>` 标签，
@@ -45,7 +47,6 @@ async function fetchIndexPageHtml(url: string): Promise<string> {
 }
 
 async function main() {
-  initializeProxyAgent();
 
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");

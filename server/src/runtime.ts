@@ -38,3 +38,18 @@ export function loadEnv(): void {
     // .env 不存在或不可读：不是错误
   }
 }
+
+/**
+ * 一次把运行时准备好：读 `.env`，再装代理。**所有入口只该调这一个函数。**
+ *
+ * 为什么不让调用方自己调那两个——实测教训：8 个入口里只有 1 个记得调 `loadEnv()`，
+ * 于是 `index.ts` 启动的服务从来没读过 `.env`，归属界面的模型提炼直接报
+ * 「未设置 DEEPSEEK_API_KEY」。两个必须一起调的初始化就不该是两个函数。
+ *
+ * 顺序无关紧要（实测：`EnvHttpProxyAgent` 是每次请求读环境变量，不是构造时快照一次），
+ * 但先读 .env 是直觉顺序，而且 API key 本来就只有这一条路进来。
+ */
+export function initializeRuntime(): void {
+  loadEnv();
+  initializeProxyAgent();
+}

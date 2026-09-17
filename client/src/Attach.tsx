@@ -29,6 +29,10 @@ interface PendingNote {
   text: string;
   /** ISO 8601 */
   at: string;
+  /** 模型从原文提炼出的检索查询。提炼失败时为空串 */
+  query: string;
+  /** 提炼是否成功。失败时 candidates 一定是空数组——见 CLAUDE.md「归属链路」Q5 那条 */
+  queryOk: boolean;
   candidates: Candidate[];
 }
 
@@ -40,6 +44,11 @@ interface NoteUIState {
   browsing: boolean;
   status: "待定" | "提交中" | "已归属" | "已丢弃";
   filter: string;
+  /** 提炼出的检索查询，可编辑。改完点「重搜」会替换候选 */
+  query: string;
+  /** 候选放在 state 里而不是直接读 note.candidates：重搜要能就地替换它们 */
+  candidates: Candidate[];
+  searching: boolean;
   error?: string;
 }
 
@@ -75,6 +84,8 @@ function isPendingNote(v: unknown): v is PendingNote {
   if (!("id" in v) || typeof v.id !== "string") return false;
   if (!("text" in v) || typeof v.text !== "string") return false;
   if (!("at" in v) || typeof v.at !== "string") return false;
+  if (!("query" in v) || typeof v.query !== "string") return false;
+  if (!("queryOk" in v) || typeof v.queryOk !== "boolean") return false;
   if (!("candidates" in v) || !Array.isArray(v.candidates)) return false;
   return v.candidates.every(isCandidate);
 }
@@ -126,7 +137,18 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
         new Map(
           parsed.map((n) => [
             n.id,
-            { text: n.text, selected: null, browsing: false, status: "待定" as const, filter: "" },
+            {
+              text: n.text,
+              selected: null,
+              // 提炼失败时直接把全部材料列表展开：退回用原文搜会给出三个
+              // 看起来正常、实际全错的候选，而人不知道提炼失败了。见 CLAUDE.md。
+              browsing: !n.queryOk,
+              status: "待定" as const,
+              filter: "",
+              query: n.query,
+              candidates: n.candidates,
+              searching: false,
+            },
           ]),
         ),
       );
@@ -193,6 +215,31 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
     }
   };
 
+  // 改了查询之后重搜。刻意走一个通用的 /api/search 而不是 note 作用域的端点：
+  // 搜索本身跟这条速记无关，查询已经被人接管了。
+  const research = async (note: PendingNote) => {
+    const state = states.get(note.id);
+    if (!state) return;
+    const q = state.query.trim();
+    if (q.length === 0) return;
+    patch(note.id, { searching: true, error: undefined });
+    try {
+      const res = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&limit=3`);
+      if (!res.ok) throw new Error(`GET /api/search → ${res.status}`);
+      const body: unknown = await res.json();
+      const found =
+        typeof body === "object" && body !== null && "candidates" in body && Array.isArray(body.candidates)
+          ? body.candidates.filter(isCandidate)
+          : [];
+      patch(note.id, { candidates: found, searching: false, selected: null });
+    } catch (err) {
+      patch(note.id, {
+        searching: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   if (loadError !== null) {
     return <div style={{ padding: "20px", color: "#c33" }}>错误：{loadError}</div>;
   }
@@ -216,7 +263,16 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
       {notes.map((note) => {
         const state =
           states.get(note.id) ??
-          { text: note.text, selected: null, browsing: false, status: "待定" as const, filter: "" };
+          {
+            text: note.text,
+            selected: null,
+            browsing: !note.queryOk,
+            status: "待定" as const,
+            filter: "",
+            query: note.query,
+            candidates: note.candidates,
+            searching: false,
+          };
         const settled = state.status === "已归属" || state.status === "已丢弃";
         const canAttach =
           state.selected !== null && state.text.trim().length > 0;
@@ -258,11 +314,74 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
 
             {!settled && (
               <>
+                {/* 提炼出的查询必须可见可编辑、且在默认视图里：它是这一轮的「标题输入框」，
+                    决定候选的控件藏起来就等于不存在（过闸那条实测教训）。
+                    作用是把静默失效变成可见失效——看到查询里写着「代理 系统功能」就知道模型抽歪了。 */}
+                <div style={{ fontSize: "13px", color: "#666", marginBottom: "6px" }}>
+                  检索查询（模型从原文提炼，可改）
+                </div>
+                <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+                  <input
+                    value={state.query}
+                    onChange={(e) => patch(note.id, { query: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void research(note);
+                    }}
+                    placeholder="例如：undici http_proxy 代理"
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      padding: "7px 10px",
+                      fontSize: "14px",
+                      fontFamily: "inherit",
+                      border: `1px solid ${note.queryOk ? "#ccc" : "#ffb74d"}`,
+                      borderRadius: "4px",
+                    }}
+                  />
+                  <button
+                    onClick={() => void research(note)}
+                    disabled={state.searching || state.query.trim().length === 0}
+                    style={{
+                      padding: "7px 14px",
+                      backgroundColor: state.searching || state.query.trim().length === 0 ? "#ccc" : "#007bff",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: state.searching ? "wait" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {state.searching ? "搜索中..." : "重搜"}
+                  </button>
+                </div>
+
+                {!note.queryOk && (
+                  <div
+                    style={{
+                      marginBottom: "12px",
+                      padding: "10px 12px",
+                      backgroundColor: "#fff3e0",
+                      border: "1px solid #ffb74d",
+                      borderRadius: "4px",
+                      fontSize: "13px",
+                      lineHeight: 1.7,
+                      color: "#7a4a00",
+                    }}
+                  >
+                    <strong>自动提炼失败</strong>，所以候选是空的。
+                    <br />
+                    这是刻意的：失败时退回用速记原文去搜，会给出三个看起来正常、
+                    <strong>实际全错</strong>的候选，而你不会知道提炼失败过。
+                    <br />
+                    下面的全部材料列表已经展开，直接挑；或者在上面敲一个查询点「重搜」。
+                  </div>
+                )}
+
                 <div style={{ fontSize: "13px", color: "#666", marginBottom: "8px" }}>
                   挂到哪份<strong>材料</strong>上？
                 </div>
 
-                {note.candidates.map((c) => (
+                {state.candidates.map((c) => (
                   <label
                     key={c.id}
                     style={{
@@ -312,7 +431,7 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
                     onChange={() => patch(note.id, { browsing: true, selected: null })}
                   />
                   <span style={{ fontSize: "14px", color: "#666" }}>
-                    {note.candidates.length === 0 ? "库里还没有材料" : "都不合适 —— 浏览全部材料"}
+                    {state.candidates.length === 0 ? "库里还没有材料" : "都不合适 —— 浏览全部材料"}
                   </span>
                 </label>
 
@@ -372,7 +491,7 @@ export function Attach({ active, onPendingCount }: { active: boolean; onPendingC
                   </div>
                 )}
 
-                {(state.browsing || note.candidates.length === 0) && (
+                {(state.browsing || state.candidates.length === 0) && (
                   <div
                     style={{
                       marginTop: "10px",

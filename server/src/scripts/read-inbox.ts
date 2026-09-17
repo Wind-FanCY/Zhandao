@@ -2,15 +2,15 @@
  * 第 1 步的验证脚本：把收件箱里的条目打印出来。
  * 用法：npm run inbox
  */
-import { initializeProxyAgent } from "../runtime.js";
 import {
   INBOX_FOLDER_NAME,
   InboxFolderNotFound,
   readInbox,
 } from "../inbox/chrome-bookmarks.js";
+import { initializeRuntime } from "../runtime.js";
 
-// 在任何网络请求之前初始化代理
-initializeProxyAgent();
+initializeRuntime();
+
 
 try {
   const { entries, matchedFolders, bookmarksPath } = await readInbox();

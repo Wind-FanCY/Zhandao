@@ -8,9 +8,9 @@
  * 因此住在数据仓库而非代码仓库。
  */
 import { evaluate, evaluateByLanguage, evaluateByOrigin, readEvalSet } from "../search/eval.js";
-import { initializeProxyAgent } from "../runtime.js";
+import { initializeRuntime } from "../runtime.js";
 
-initializeProxyAgent();
+initializeRuntime();
 
 const cases = await readEvalSet();
 if (cases.length === 0) {

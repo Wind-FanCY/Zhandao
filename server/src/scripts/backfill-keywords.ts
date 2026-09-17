@@ -14,10 +14,9 @@ import { load } from "js-yaml";
 
 import { resolveDataDir } from "../data-dir.js";
 import { cjkRatio, generateChineseKeywords, needsChineseKeywords } from "../model/keywords.js";
-import { initializeProxyAgent, loadEnv } from "../runtime.js";
+import { initializeRuntime } from "../runtime.js";
 
-loadEnv();
-initializeProxyAgent();
+initializeRuntime();
 
 const write = process.argv.includes("--write");
 const dir = resolve(resolveDataDir(), "materials");

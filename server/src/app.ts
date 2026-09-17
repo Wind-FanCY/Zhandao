@@ -8,8 +8,11 @@ import { appendProcessed, readProcessedUrls } from "./inbox/processed.js";
 import { cacheExtraction, readCachedExtraction } from "./inbox/extract-cache.js";
 import { readQuickNotes } from "./quicknotes/append.js";
 import { appendNoteProcessed, readProcessedNoteIds } from "./quicknotes/processed.js";
+import { cacheDistilledQuery, readCachedQuery } from "./quicknotes/query-cache.js";
 import { writeAnnotation, EmptyAnnotation, MissingHostMaterial } from "./annotations/write.js";
 import { buildMaterialsIndex, searchMaterials, getMaterial, listMaterials } from "./search/materials-index.js";
+import { distillQuery, QueryDistillFailed } from "./model/distill-query.js";
+import { MissingApiKey } from "./model/keywords.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -96,13 +99,27 @@ async function readPendingInbox(inboxBookmarksPath?: string): Promise<{
   };
 }
 
-export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): Express {
+/**
+ * @param distillFn 提炼「速记原文 → 检索查询」的实现，默认用真的 `distillQuery`（会调 DeepSeek）。
+ *   供测试注入假实现，好让 `GET /api/notes/pending` 的测试离线跑。
+ *
+ * 这里原先还有一个 `fetchFn?: typeof fetch` 参数，**已删除**：它从声明那天起就没有
+ * 任何地方读取过，而 `extract.ts` 也没有接收 fetch 的入口，所以它根本接不上。
+ * 一个看起来像注入点、实际什么都不做的参数比没有更糟——有人传了 stub 进来，
+ * 然后纳闷为什么测试还在打真实网络，而失效是静默的。要做 fetch 注入得先在
+ * `extractArticle` 的 options 里开口子。
+ */
+export function createApp(
+  inboxBookmarksPath?: string,
+  distillFn?: (noteText: string) => Promise<string>,
+): Express {
 
   // 作业状态必须在 createApp 之内：原先是模块级的，于是所有 app 实例共享同一份，
   // 测试之间互相污染（一条测试起的作业会被下一条的 POST /fetch 当成「已有作业」返回）。
   // 生产只有一个 app 所以看不出来，但那是巧合，不是设计。
   const jobs = new Map<string, Job>();
   let currentJobId: string | null = null;
+  const distill = distillFn ?? distillQuery;
   const app = express();
 
   // CORS 中间件：只允许 http://localhost:5173
@@ -448,10 +465,16 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
 
   /**
    * GET /api/notes/pending
-   * 列出待归属的**速记**（不在 quicknotes-processed.jsonl 里的那些），
-   * 每条附上 BM25 直出的 3 个候选宿主**材料**。
+   * 列出待归属的**速记**（不在 quicknotes-processed.jsonl 里的那些）。
    *
-   * 每次请求都重建索引：材料只有几篇，缓存带来的「索引与磁盘不一致」风险
+   * 候选宿主不再直接拿速记原文去 BM25——原文里的填充词把信号淹了（实测：
+   * 原文当查询连前 12 都进不去，「undici 不读 http_proxy 代理」这八个字排第 1）。
+   * 所以先用模型把原文提炼成短查询，再拿查询去搜。见 CLAUDE.md「归属链路的实现约束」。
+   *
+   * 每条速记的提炼结果永久缓存在 `.cache/`（键是速记 id），命中就不再调模型。
+   * 多条速记并发提炼：抓取要顺序化是因为站点限流，模型 API 没有这个理由。
+   *
+   * 每次请求都重建材料索引：材料只有几篇，缓存带来的「索引与磁盘不一致」风险
    * 比重建的开销更值得避免。
    */
   app.get("/api/notes/pending", async (req: Request, res: Response, next: NextFunction) => {
@@ -466,17 +489,98 @@ export function createApp(inboxBookmarksPath?: string, fetchFn?: typeof fetch): 
         .filter((note) => !processedIds.has(note.id))
         .sort((a, b) => a.at.localeCompare(b.at));
 
-      const notes = pending.map((note) => {
-        const candidates = searchMaterials(index, note.text, 3).map((m) => ({
-          id: m.id,
-          title: m.title,
-          source: m.source,
-          score: m.score,
-        }));
-        return { id: note.id, text: note.text, at: note.at, candidates };
-      });
+      const notes = await Promise.all(
+        pending.map(async (note) => {
+          const cached = await readCachedQuery(note.id);
+
+          // `query` 只在下面两个分支里各赋值一次（要么缓存命中，要么提炼成功），
+          // 提炼失败的分支直接 return，所以走到下面 searchMaterials 时它必已被赋值。
+          let query: string;
+          if (cached !== null) {
+            query = cached;
+          } else {
+            try {
+              query = await distill(note.text);
+              // 缓存失败不应该影响本次响应：下次请求会重新调模型，代价只是多一次往返
+              await cacheDistilledQuery(note.id, query).catch((err) => {
+                console.error(`Failed to cache distilled query for ${note.id}:`, err);
+              });
+            } catch (err) {
+              // 提炼失败：不能退回用原文搜——那会产出三个看起来正常、实际全错的候选，
+              // 而使用者不知道提炼失败了。单条失败不能影响其他条目，故只 catch 在这条闭包内。
+              //
+              // 预期失败（模型返回空、缺 key）与意外错误（我们自己的 bug）**处置相同**，
+              // 但意外错误必须留下痕迹：否则代码里一个 TypeError 会伪装成「模型提炼失败」，
+              // 界面照常提示、而真正的原因永远查不到。静默失效是这个项目反复吃过的亏。
+              if (err instanceof QueryDistillFailed || err instanceof MissingApiKey) {
+                console.warn(`提炼失败（预期路径）note=${note.id}: ${err.message}`);
+              } else {
+                console.error(`提炼时发生意外错误 note=${note.id}——这不是模型的问题：`, err);
+              }
+              return {
+                id: note.id,
+                text: note.text,
+                at: note.at,
+                query: "",
+                queryOk: false,
+                candidates: [],
+              };
+            }
+          }
+
+          const candidates = searchMaterials(index, query, 3).map((m) => ({
+            id: m.id,
+            title: m.title,
+            source: m.source,
+            score: m.score,
+          }));
+          return { id: note.id, text: note.text, at: note.at, query, queryOk: true, candidates };
+        }),
+      );
 
       res.json({ notes });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/search?q=...&limit=...
+   * 供归属界面在人改了提炼出的查询之后重搜。
+   *
+   * Query: q（必填）、limit（可选，默认 3，上限 20）
+   * Response: { candidates: [{ id, title, source, score }] } (200)
+   *           { error: "..." } (400)
+   */
+  app.get("/api/search", async (req: Request, res: Response) => {
+    try {
+      // req.query 的值类型允许 string | ParsedQs | (string | ParsedQs)[] | undefined，
+      // 手写 typeof 收窄而不是 `as string`——外部输入不可信。
+      const qRaw = req.query.q;
+      const q = typeof qRaw === "string" ? qRaw.trim() : "";
+      if (q.length === 0) {
+        return res.status(400).json({ error: "Missing or empty q" });
+      }
+
+      let limit = 3;
+      const limitRaw = req.query.limit;
+      if (typeof limitRaw === "string") {
+        const parsedLimit = Number(limitRaw);
+        if (Number.isFinite(parsedLimit) && parsedLimit > 0) {
+          limit = Math.min(Math.trunc(parsedLimit), 20);
+        }
+      }
+
+      const index = await buildMaterialsIndex();
+      const candidates = searchMaterials(index, q, limit).map((m) => ({
+        id: m.id,
+        title: m.title,
+        source: m.source,
+        score: m.score,
+      }));
+
+      res.json({ candidates });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       return res.status(500).json({ error: message });

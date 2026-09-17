@@ -474,6 +474,8 @@ interface PendingNote {
   id: string;
   text: string;
   at: string;
+  query: string;
+  queryOk: boolean;
   candidates: PendingNoteCandidate[];
 }
 
@@ -493,6 +495,8 @@ function isPendingNote(value: unknown): value is PendingNote {
     typeof value.id === "string" &&
     typeof value.text === "string" &&
     typeof value.at === "string" &&
+    typeof value.query === "string" &&
+    typeof value.queryOk === "boolean" &&
     Array.isArray(value.candidates) &&
     value.candidates.every(isPendingNoteCandidate)
   );
@@ -533,6 +537,11 @@ describe("Notes routes (归属)", () => {
   let server: Server;
   let port: number;
   let dataDir: string;
+  // 可在每条测试里重新赋值的提炼实现：默认原样返回原文，保持这组测试里
+  // 早于「提炼查询」这个特性就写好的用例（直接拿原文当查询）行为不变；
+  // 需要测试提炼失败 / 调用次数的用例再各自覆盖它。
+  let distillImpl: (noteText: string) => Promise<string>;
+  let distillCallCount: number;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "zhandao-notes-test-"));
@@ -546,7 +555,15 @@ describe("Notes routes (归属)", () => {
     };
     await writeFile(bookmarksFile, JSON.stringify(testBookmarks, null, 2));
 
-    const app = createApp(bookmarksFile);
+    distillImpl = async (noteText: string) => noteText;
+    distillCallCount = 0;
+
+    // 注入假的提炼实现：不许真的调 DeepSeek。间接调用 distillImpl 而不是直接传它，
+    // 好让每条测试能在请求发出前重新赋值 distillImpl / 读到 distillCallCount。
+    const app = createApp(bookmarksFile, async (noteText: string) => {
+      distillCallCount += 1;
+      return distillImpl(noteText);
+    });
     server = await new Promise<Server>((resolveFn) => {
       const srv = app.listen(0, () => {
         const address = srv.address();
@@ -624,6 +641,8 @@ describe("Notes routes (归属)", () => {
     assert.strictEqual(notes.length, 1);
     assert.strictEqual(notes[0]?.id, note.id);
     assert.strictEqual(notes[0]?.text, note.text);
+    assert.strictEqual(notes[0]?.queryOk, true);
+    assert.strictEqual(notes[0]?.query, note.text); // 这条测试的假实现是恒等函数
     assert.ok(notes[0] && notes[0].candidates.length > 0, "库里有材料时应返回至少一个候选");
   });
 
@@ -636,6 +655,99 @@ describe("Notes routes (归属)", () => {
 
     assert.strictEqual(notes.length, 1);
     assert.deepEqual(notes[0]?.candidates, []);
+  });
+
+  test("pending 用提炼后的查询搜，而不是原文", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+
+    // 材料标题只匹配提炼后的查询，不匹配原文——这样才能确认搜索确实
+    // 用的是 distillFn 的输出，而不是速记原文
+    await writeMaterial({
+      title: "undici 代理配置",
+      markdown: "undici 不读 http_proxy 环境变量，需要 EnvHttpProxyAgent",
+      source: "https://example.com/undici-proxy",
+    });
+    distillImpl = async () => "undici 代理配置";
+
+    const note = await appendQuickNote(
+      "站点一直连不上，排查了半天，原因跟代理设置有关系，具体细节记不清了",
+    );
+
+    const res = await fetch(`http://localhost:${port}/api/notes/pending`);
+    assert.strictEqual(res.status, 200);
+    const notes = parsePendingNotes(await res.json());
+
+    assert.strictEqual(notes.length, 1);
+    assert.strictEqual(notes[0]?.id, note.id);
+    assert.strictEqual(notes[0]?.query, "undici 代理配置");
+    assert.strictEqual(notes[0]?.queryOk, true);
+    assert.ok(
+      notes[0]?.candidates.some((c) => c.title === "undici 代理配置"),
+      "应该用提炼后的查询命中该材料",
+    );
+  });
+
+  test("提炼查询的缓存命中时不再调用 distillFn", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const note = await appendQuickNote("一条会被提炼、然后缓存命中的速记");
+
+    const first = await fetch(`http://localhost:${port}/api/notes/pending`);
+    assert.strictEqual(first.status, 200);
+    assert.strictEqual(distillCallCount, 1);
+
+    const countAfterFirst = distillCallCount;
+    const second = await fetch(`http://localhost:${port}/api/notes/pending`);
+    assert.strictEqual(second.status, 200);
+    assert.strictEqual(
+      distillCallCount,
+      countAfterFirst,
+      "第二次请求应命中缓存，不应再调用 distillFn",
+    );
+
+    const notes = parsePendingNotes(await second.json());
+    assert.strictEqual(notes[0]?.id, note.id);
+    assert.strictEqual(notes[0]?.queryOk, true);
+  });
+
+  test("distillFn 失败时该条 queryOk 为 false、candidates 为空，且不影响其他条目", async () => {
+    const { appendQuickNote } = await import("./quicknotes/append.js");
+    const { writeMaterial } = await import("./materials/write.js");
+
+    await writeMaterial({
+      title: "材料 A",
+      markdown: "能被正常匹配到的内容",
+      source: "https://example.com/a",
+    });
+
+    const goodNote = await appendQuickNote("材料 A");
+    // append 之后再切换实现：goodNote 走默认恒等函数（先请求过一次会被缓存，
+    // 所以这里改成显式失败 only for 下一条，靠 note 内容区分）
+    const badNote = await appendQuickNote("会让提炼失败的那一条");
+
+    distillImpl = async (noteText: string) => {
+      if (noteText === badNote.text) {
+        throw new Error("模拟提炼失败");
+      }
+      return noteText;
+    };
+
+    const res = await fetch(`http://localhost:${port}/api/notes/pending`);
+    assert.strictEqual(res.status, 200);
+    const notes = parsePendingNotes(await res.json());
+    assert.strictEqual(notes.length, 2);
+
+    const good = notes.find((n) => n.id === goodNote.id);
+    const bad = notes.find((n) => n.id === badNote.id);
+
+    assert.ok(good, "未失败的条目应该照常返回");
+    assert.strictEqual(good?.queryOk, true);
+    assert.ok(good && good.candidates.length > 0);
+
+    assert.ok(bad, "失败的条目也应该出现在响应里");
+    assert.strictEqual(bad?.queryOk, false);
+    assert.strictEqual(bad?.query, "");
+    assert.deepStrictEqual(bad?.candidates, []);
   });
 
   test("attach 成功后该 note 不再出现在 pending 里", async () => {
@@ -768,5 +880,52 @@ describe("Notes routes (归属)", () => {
     const pendingRes = await fetch(`http://localhost:${port}/api/notes/pending`);
     const pendingNotes = parsePendingNotes(await pendingRes.json());
     assert.strictEqual(pendingNotes.length, 0);
+  });
+
+  test("GET /api/search 用给定查询直接搜，返回候选材料", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    await writeMaterial({
+      title: "undici 代理配置",
+      markdown: "undici 不读 http_proxy 环境变量",
+      source: "https://example.com/undici-proxy",
+    });
+
+    const res = await fetch(
+      `http://localhost:${port}/api/search?q=${encodeURIComponent("undici 代理")}`,
+    );
+    assert.strictEqual(res.status, 200);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.ok(Array.isArray(body.candidates));
+    assert.ok(body.candidates.length > 0);
+  });
+
+  test("GET /api/search 缺 q 返回 400", async () => {
+    const res = await fetch(`http://localhost:${port}/api/search`);
+    assert.strictEqual(res.status, 400);
+    assert.ok(hasErrorField(await res.json()));
+  });
+
+  test("GET /api/search q 为空白字符串返回 400", async () => {
+    const res = await fetch(`http://localhost:${port}/api/search?q=${encodeURIComponent("   ")}`);
+    assert.strictEqual(res.status, 400);
+  });
+
+  test("GET /api/search 支持 limit 参数", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    for (let i = 0; i < 5; i++) {
+      await writeMaterial({
+        title: `材料 ${i}`,
+        markdown: "共同关键词 共同关键词 共同关键词",
+        source: `https://example.com/${i}`,
+      });
+    }
+
+    const res = await fetch(`http://localhost:${port}/api/search?q=共同关键词&limit=2`);
+    assert.strictEqual(res.status, 200);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.ok(Array.isArray(body.candidates));
+    assert.strictEqual(body.candidates.length, 2);
   });
 });
