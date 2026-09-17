@@ -340,6 +340,48 @@ undici EnvHttpProxyAgent    ✓ 1.7s   200  361KB
 
 ---
 
+## launchd 在 `~/Desktop` 下跑不起来（TCC）
+
+2026-09-18 实测。ADR-0004 定了「定时触发用 launchd」，但它假设了 launchd 能读到仓库
+——**在 `~/Desktop` 下这个假设不成立。**
+
+装好 agent、`launchctl kickstart` 之后：
+
+```
+/bin/bash: .../Zhandao/code/bin/push.sh: Operation not permitted
+last exit code = 126
+```
+
+用一个放在非保护目录的探针脚本逐项定位（launchd 起的同一个 agent）：
+
+```
+① 在非保护目录执行            可以
+② ls Desktop 下的文件         可以读（元数据放行）
+③ 读 data/ 里的文件内容        被拒
+④ 执行 Desktop 下的脚本        被拒（126）
+```
+
+**只有 stat 放行，读内容和执行都被拒。** 所以「只把包装脚本搬出保护目录」不够——
+push 脚本要读 `data/` 与整个 `code/`，全在拒绝范围内。
+
+launchd 自己也把另一个坑摊了出来（`launchctl print` 的输出）：
+
+```
+PATH => /usr/bin:/bin:/usr/sbin:/sbin
+```
+
+**没有 nvm 那一段。** 本机 node 是 nvm 装的，而 nvm 靠改 shell 配置塞 PATH，
+launchd 不读任何 shell 配置。`env -i HOME=$HOME sh -c 'npm run push'` 实测
+`npm: command not found`——**静默失败，表现只会是「怎么没弹通知」**。
+`bin/push.sh` 就是为这个写的（source nvm、用 default 别名，不把版本号钉进 plist）。
+这与「`index.ts` 从来没调 `loadEnv()`」是同一类问题的第二次出现：
+**launchd 是一条平时看不见的启动路径。**
+
+**已排除的修法**：搬仓库出 Desktop（本人否决，牵涉太多）；给 `/bin/bash` 开完全磁盘
+访问（不成比例：这台机器上所有 bash 脚本永久获得全部受保护数据的访问权，
+换一条每日通知）。`bin/push.sh` 与 plist 模板保留在仓库里——它们记着这次的实测，
+而且仓库一旦离开 Desktop 就能直接用。
+
 ## 方法论教训
 
 ### 量前端性能：先确认仪器，rAF 会骗你

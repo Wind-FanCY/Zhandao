@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd 定时触发（ADR-0004）。安装位置：~/Library/LaunchAgents/com.zhandao.push.plist
+
+  装：  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zhandao.push.plist
+  查：  launchctl print gui/$(id -u)/com.zhandao.push
+  立即跑一次： launchctl kickstart -k gui/$(id -u)/com.zhandao.push
+  卸：  launchctl bootout gui/$(id -u)/com.zhandao.push && rm ~/Library/LaunchAgents/com.zhandao.push.plist
+
+  三处刻意的选择：
+  - 走 bin/push.sh 而不是直接写 node 的绝对路径：后者会钉死版本号，nvm 升级就断。
+  - RunAtLoad 为 false：每次登录都弹一条通知是骚扰，不是推送。
+  - 有 StandardOutPath / StandardErrorPath：launchd 的失败是静默的，
+    没有日志就只表现为「怎么没弹通知」。这个项目已经吃过两次静默失效的亏。
+
+  ROOT 需替换为仓库 code/ 的绝对路径。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zhandao.push</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>ROOT/bin/push.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>10</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>HOMEDIR/Library/Logs/zhandao-push.log</string>
+  <key>StandardErrorPath</key>
+  <string>HOMEDIR/Library/Logs/zhandao-push.log</string>
+</dict>
+</plist>
