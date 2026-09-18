@@ -45,13 +45,15 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
   const oncePerDay = args.includes("--once-per-day");
-  // hook 模式。**两次实测都没能把消息直接呈现给本人**：
-  //   ① 纯 stdout：hook 成功时界面几乎不显示（Claude Code 的设计是静默成功不打扰）
-  //   ② JSON 的 systemMessage：同样没呈现（SessionStart 上似乎不渲染它）
-  // 唯一确认送达的是 hookSpecificOutput.additionalContext——它进的是**模型**的上下文。
-  // 所以这里改成让 additionalContext **指示模型在第一条回复里告诉本人**：
-  // 走模型的正常输出，是唯一保证可见的路径。
-  // systemMessage 仍然留着（万一将来渲染了就是白送的），但不再依赖它。
+  // hook 模式。**`systemMessage` 是呈现给本人的那一条**，界面上显示为
+  // 「SessionStart:resume says: …」。踩过的坑：一度同时设了 `suppressOutput: true`，
+  // 结果连 systemMessage 一起被压掉，看起来像「SessionStart 不渲染 systemMessage」
+  // ——**不要设 suppressOutput**。（未单独隔离验证，但那行 says 的内容正是
+  // systemMessage 的值，而它出现的那次恰好是去掉 suppressOutput 的那次。）
+  //
+  // 纯 stdout 不行：hook 成功时界面几乎不显示（Claude Code 的设计是静默成功不打扰）。
+  // additionalContext 进的是**模型**的上下文，只用来让模型知道今天推了什么，
+  // **不要在里面指示模型复述**——systemMessage 已经显示过了，再说一遍是重复噪音。
   const hookMode = args.includes("--hook");
 
   // hook 场景下必须完全静默：SessionStart 的输出会进对话上下文，
@@ -76,12 +78,11 @@ async function main(): Promise<void> {
         systemMessage: `今天该读：${kind} · ${material.title}`,
         hookSpecificOutput: {
           hookEventName: "SessionStart",
+          // 纯信息，不含指示：本人已经通过 systemMessage 看到了，模型不必复述。
           additionalContext:
-            `【今日推送，请在本轮第一条回复的开头把这条告诉本人，一两行即可，不要展开】\n` +
-            `今天该读：${kind} · ${material.title}\n` +
-            `来源 ${material.source}，收录于 ${since.slice(0, 10)}。\n` +
-            `读完走三个终态之一：写标注 / 留档 / 划掉，界面在「阅读」标签（npm run dev）。\n` +
-            `本人已知这套机制，不需要解释来历；本轮若在聊别的事，说完这一两行就继续原话题。`,
+            `今天的推送（本人已通过界面看到，不必复述）：${kind} · ${material.title}` +
+            `（${material.source}，收录于 ${since.slice(0, 10)}）。` +
+            `读完走三个终态之一：写标注 / 留档 / 划掉，界面在「阅读」标签。`,
         },
       }),
     );
