@@ -45,10 +45,13 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
   const oncePerDay = args.includes("--once-per-day");
-  // hook 模式。实测教训：hook 成功时普通 stdout 在界面上几乎不可见
-  // （Claude Code 的设计是「静默成功不打扰」，只有报错/超时才显眼）——
-  // 那次 hook 确实跑了、输出也进了模型上下文，但本人完全没看到。
-  // 只有 JSON 的 systemMessage 字段会呈现给人。
+  // hook 模式。**两次实测都没能把消息直接呈现给本人**：
+  //   ① 纯 stdout：hook 成功时界面几乎不显示（Claude Code 的设计是静默成功不打扰）
+  //   ② JSON 的 systemMessage：同样没呈现（SessionStart 上似乎不渲染它）
+  // 唯一确认送达的是 hookSpecificOutput.additionalContext——它进的是**模型**的上下文。
+  // 所以这里改成让 additionalContext **指示模型在第一条回复里告诉本人**：
+  // 走模型的正常输出，是唯一保证可见的路径。
+  // systemMessage 仍然留着（万一将来渲染了就是白送的），但不再依赖它。
   const hookMode = args.includes("--hook");
 
   // hook 场景下必须完全静默：SessionStart 的输出会进对话上下文，
@@ -68,17 +71,17 @@ async function main(): Promise<void> {
   const { material, kind, since } = candidate;
 
   if (hookMode) {
-    // suppressOutput：别让这段 JSON 原样出现在对话里；systemMessage 才是给人看的那行。
-    // additionalContext 让模型也知道今天推了什么，否则它得自己去查。
     console.log(
       JSON.stringify({
         systemMessage: `今天该读：${kind} · ${material.title}`,
-        suppressOutput: true,
         hookSpecificOutput: {
           hookEventName: "SessionStart",
           additionalContext:
-            `今天的推送：${kind} · ${material.title}（${material.source}，since ${since}）。` +
-            "读完后走三个终态之一：写标注 / 留档 / 划掉，界面在「阅读」标签。",
+            `【今日推送，请在本轮第一条回复的开头把这条告诉本人，一两行即可，不要展开】\n` +
+            `今天该读：${kind} · ${material.title}\n` +
+            `来源 ${material.source}，收录于 ${since.slice(0, 10)}。\n` +
+            `读完走三个终态之一：写标注 / 留档 / 划掉，界面在「阅读」标签（npm run dev）。\n` +
+            `本人已知这套机制，不需要解释来历；本轮若在聊别的事，说完这一两行就继续原话题。`,
         },
       }),
     );

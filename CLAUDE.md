@@ -419,6 +419,15 @@ TypeScript 的类型编译完就被擦掉，运行时不存在。所以 `JSON.pa
   状态在 `<dataDir>/.cache/push-last-shown`，**可丢**（丢了最坏就是多提示一次）。
   **默认行为刻意不去重**：手动敲 `npm run push` 就该永远给答案。
 - **hook 里用 `--dry-run`（不发系统通知）**：正文已经进对话了，再弹一条通知是重复噪音。
+- **推送内容必须经由模型的正常输出呈现，不能指望 hook 自己显示。** 两次实测都失败：
+  ① 纯 stdout——hook 成功时界面几乎不显示（Claude Code 的设计是静默成功不打扰，
+  只有报错/超时才显眼）；② JSON 的 `systemMessage`——`SessionStart` 上同样没呈现。
+  两次 hook 都确实跑了（系统行有 `hook success` / `hook additional context` 的证据），
+  **是可见性问题，不是没触发**。
+  唯一确认送达的是 `hookSpecificOutput.additionalContext`，而它进的是**模型的上下文**。
+  所以 `--hook` 模式的 `additionalContext` **写成一条指示**：让模型在本轮第一条回复的开头
+  转达一两行。`systemMessage` 仍然留着（将来若渲染就是白送），但**不依赖它**。
+  **`claude -c`（resume）照样触发**，那不是原因——已有系统行证据。
 - 脚本本身仍按 ADR-0004：读数据、算一篇、退出——**不起常驻进程、不碰模型、不联网**
   （`fetch` 与模型调用在 `push.ts` / `pool.ts` 里各 0 处，已 grep 确认）。
 
