@@ -2,6 +2,7 @@
  * 推送触发脚本：`npm run push`
  *   `--dry-run`       只打印，不发通知
  *   `--once-per-day`  今天已经提示过就**一个字都不输出**、直接退出
+ *   `--hook`          输出 Claude Code 的 hook JSON（systemMessage），而不是给人读的文本
  *
  * `--once-per-day` 是给 Claude Code 的 `SessionStart` hook 用的：它每开一个会话
  * 就触发一次，一天可能好几次，而同一行反复出现是噪音。
@@ -44,6 +45,11 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
   const oncePerDay = args.includes("--once-per-day");
+  // hook 模式。实测教训：hook 成功时普通 stdout 在界面上几乎不可见
+  // （Claude Code 的设计是「静默成功不打扰」，只有报错/超时才显眼）——
+  // 那次 hook 确实跑了、输出也进了模型上下文，但本人完全没看到。
+  // 只有 JSON 的 systemMessage 字段会呈现给人。
+  const hookMode = args.includes("--hook");
 
   // hook 场景下必须完全静默：SessionStart 的输出会进对话上下文，
   // 打一行「今天已提示过」本身就是它要消掉的那种噪音。
@@ -60,6 +66,26 @@ async function main(): Promise<void> {
   }
 
   const { material, kind, since } = candidate;
+
+  if (hookMode) {
+    // suppressOutput：别让这段 JSON 原样出现在对话里；systemMessage 才是给人看的那行。
+    // additionalContext 让模型也知道今天推了什么，否则它得自己去查。
+    console.log(
+      JSON.stringify({
+        systemMessage: `今天该读：${kind} · ${material.title}`,
+        suppressOutput: true,
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext:
+            `今天的推送：${kind} · ${material.title}（${material.source}，since ${since}）。` +
+            "读完后走三个终态之一：写标注 / 留档 / 划掉，界面在「阅读」标签。",
+        },
+      }),
+    );
+    if (oncePerDay) await markShownToday();
+    return;
+  }
+
   console.log(`[推送] ${kind} · ${material.title}`);
   console.log(`  来源：${material.source}`);
   console.log(`  since：${since}`);
