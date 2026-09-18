@@ -21,8 +21,26 @@ BM25 检索与评估脚本、索引时翻译、**归属**链路（速记 → 标
 
 目录布局：`Zhandao/` 是容器（非仓库），其下 `code/`（本仓库）与 `data/`（材料与标注，独立私有仓库）平级——见 ADR-0005。
 
-`Zhandao/CLAUDE.md` 是指向 `code/CLAUDE.md` 的**软链接**（同一 inode），这样在容器目录开会话也能加载到约束。
-内容只有一份、受 `code/` 版本控制。链接本身不受版本控制，坏了就 `ln -sf code/CLAUDE.md CLAUDE.md` 重建。
+容器目录里有**两条软链接**，都指向 `code/` 下的真身（同一 inode），这样从 `Zhandao/` 开会话也能拿到全套配置：
+
+```
+Zhandao/CLAUDE.md  ->  code/CLAUDE.md      加载得到约束
+Zhandao/.claude    ->  code/.claude        加载得到 SessionStart hook 与 permissions
+```
+
+内容只有一份、受 `code/` 版本控制。**链接本身不受版本控制**，坏了就重建：
+
+```bash
+cd ~/Desktop/wind-Fancy/Zhandao
+ln -sf code/CLAUDE.md CLAUDE.md
+ln -sfn code/.claude .claude      # -n：别跟进已存在的目录链接里去建嵌套链接
+```
+
+`.claude` 那条是 2026-09-18 加的，实测触发点：从 `Zhandao/` 起会话时 hook 不触发
+——项目级设置按**启动目录**找，而容器不是 git 仓库，所以项目根就是 `Zhandao/` 本身。
+**软链整个目录而不是单个文件**：将来在 `code/.claude/` 里加 `agents/` 或 `commands/` 会自动跟上。
+hook 命令里写的是**绝对** `cd`，所以从哪个目录起都能执行。
+
 本文件里的相对路径（如 `docs/findings.md`）都相对 `code/`；在容器目录开会话时是 `code/docs/findings.md`。
 
 ## 术语表要维护 `_Code_` 行
