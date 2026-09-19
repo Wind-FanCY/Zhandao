@@ -27,7 +27,20 @@ import { readCachedDrills } from "./drills/cache.js";
  * compression 中间件会给 Response 对象添加 flush 方法。
  */
 interface Flushable {
-  flush?: () => void;
+  flush: () => void;
+}
+
+/**
+ * HTTP 请求（query / body）是本项目的第五处外部边界，`CLAUDE.md` 的边界表里补了这一行。
+ * 它最经常被外部输入触达，却一度是唯一用 `as` 断言而非检查处理的一处。
+ */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+/** `flush` 是 compression 中间件在运行时挂上去的，编译期不存在——所以只能运行时问。 */
+function hasFlush(v: unknown): v is Flushable {
+  return isRecord(v) && "flush" in v && typeof v.flush === "function";
 }
 
 /** 单个作业的状态跟踪 */
@@ -68,8 +81,9 @@ function broadcastEvent(job: Job, eventType: string, data: unknown): void {
       // 如果启用了 compression，必须 flush 以确保数据立刻发送。
       // compression 中间件会给 Response 对象添加 flush 方法，用来强制 flush 缓冲的数据。
       // 这是实测过的坑，不处理会导致 SSE 事件堆积在缓冲区中延迟发送。
-      const maybeFlushable = listener as unknown as Flushable;
-      maybeFlushable.flush?.();
+      // 用类型守卫而非 `listener as unknown as Flushable`：双重断言是这份代码库里
+      // 最强的「相信我」，而 flush 到底在不在完全取决于运行时有没有挂 compression。
+      if (hasFlush(listener)) listener.flush();
     } catch (err) {
       // 写入失败，移除该监听者
       const idx = job.listeners.indexOf(listener);
@@ -304,7 +318,11 @@ export function createApp(
    * SSE 订阅该作业的进度事件。
    */
   app.get("/api/inbox/events", (req: Request, res: Response, next: NextFunction) => {
-    const jobId = req.query.jobId as string | undefined;
+    // Express 的 query 值可能是 string | string[] | ParsedQs | ParsedQs[]——
+    // `?jobId=a&jobId=b` 时它是**数组**，而 `as string` 断言拦不住，
+    // 下面的 `!jobId` 对数组恒为假（数组是 truthy），就会带着一个数组往下走。
+    const rawJobId: unknown = req.query.jobId;
+    const jobId = typeof rawJobId === "string" ? rawJobId : undefined;
 
     if (!jobId) {
       return res.status(400).json({ error: "Missing jobId query parameter" });
@@ -363,7 +381,11 @@ export function createApp(
    */
   app.post("/api/inbox/keep", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { url, title } = req.body as Record<string, unknown>;
+      const body: unknown = req.body;
+      if (!isRecord(body)) {
+        return res.status(400).json({ error: "Missing or invalid request body" });
+      }
+      const { url, title } = body;
 
       // 验证必需字段
       if (!url || typeof url !== "string") {
@@ -427,7 +449,11 @@ export function createApp(
    */
   app.post("/api/inbox/drop", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { url } = req.body as Record<string, unknown>;
+      const body: unknown = req.body;
+      if (!isRecord(body)) {
+        return res.status(400).json({ error: "Missing or invalid request body" });
+      }
+      const { url } = body;
 
       // 验证必需字段
       if (!url || typeof url !== "string") {

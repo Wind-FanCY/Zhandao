@@ -257,6 +257,34 @@ describe("Express App Routes", () => {
     }
   });
 
+  test("GET /api/inbox/events 重复的 jobId 参数按缺失处理，返回 400", async () => {
+    // 回归守卫：这里一度写的是 `req.query.jobId as string | undefined`。
+    // Express 在 `?jobId=a&jobId=b` 时给的是**数组**，断言拦不住它，
+    // 而后面的 `if (!jobId)` 对数组恒为假（数组是 truthy），于是带着一个数组
+    // 一路往下走到 jobs 查找。改成 typeof 收窄之后它落进「缺参数」分支。
+    const response = await fetch(`http://localhost:${port}/api/inbox/events?jobId=a&jobId=b`);
+    assert.strictEqual(response.status, 400);
+    // 断言文案：改之前这条路径返回的是 404（数组被当成 jobId 去查作业、查不到），
+    // 只断言「不是 200」区分不出修没修。
+    const body: unknown = await response.json();
+    assert.ok(body !== null && typeof body === "object" && "error" in body);
+    assert.strictEqual(body.error, "Missing jobId query parameter");
+  });
+
+  test("POST /api/inbox/keep 没有 Content-Type 时返回 400 而不是崩", async () => {
+    // 回归守卫：这里一度写的是 `req.body as Record<string, unknown>`。
+    // **触发点不是「JSON 不是对象」**——那种请求被 express.json() 的 strict 模式
+    // 挡在外面，返回的是 HTML 错误页，我们的代码根本跑不到（实测确认过）。
+    // 真正的触发点是**没有 Content-Type**：express.json() 此时不填 req.body，
+    // 它是 undefined，而 `const { url } = undefined` 直接抛 TypeError。
+    // 所以必须断言**错误文案**而不只是状态码，否则这条测试会因为错误的原因通过。
+    const response = await fetch(`http://localhost:${port}/api/inbox/keep`, { method: "POST" });
+    assert.strictEqual(response.status, 400);
+    const body: unknown = await response.json();
+    assert.ok(body !== null && typeof body === "object" && "error" in body);
+    assert.strictEqual(body.error, "Missing or invalid request body");
+  });
+
   test("GET /api/inbox/events returns 404 for non-existent jobId", async () => {
     const response = await fetch(`http://localhost:${port}/api/inbox/events?jobId=invalid-job-id`);
     assert.strictEqual(response.status, 404);
