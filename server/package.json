@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "inbox": "tsx src/scripts/read-inbox.ts",
     "search": "tsx src/scripts/search.ts",
     "typecheck": "tsc --noEmit",

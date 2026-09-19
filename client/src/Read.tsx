@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import type { CSSProperties, ReactElement } from "react";
+import type { CSSProperties } from "react";
+import { renderBody } from "./renderMarkdown.js";
+import { Drill } from "./Drill.js";
 
 /**
  * 阅读视图：推送把你指向一篇**材料**，这里读它，然后走三个终态之一
@@ -15,6 +17,13 @@ interface PoolItem {
   source: string;
   kind: string;
   since: string;
+}
+
+/** 全部材料（不限于推送池），供左侧列表补全「已标注」那一段。与 Attach.tsx 的 Material 同形状。 */
+interface Material {
+  id: string;
+  title: string;
+  source: string;
 }
 
 interface Annotation {
@@ -47,6 +56,19 @@ function isPoolItem(v: unknown): v is PoolItem {
   return true;
 }
 
+function isMaterial(v: unknown): v is Material {
+  if (!isRecord(v)) return false;
+  for (const k of ["id", "title", "source"]) {
+    if (!(k in v) || typeof v[k] !== "string") return false;
+  }
+  return true;
+}
+
+function parseMaterials(payload: unknown): Material[] {
+  if (!isRecord(payload) || !Array.isArray(payload.materials)) return [];
+  return payload.materials.filter(isMaterial);
+}
+
 function isAnnotation(v: unknown): v is Annotation {
   if (!isRecord(v)) return false;
   return (
@@ -76,48 +98,6 @@ function hostnameOf(url: string): string {
   } catch {
     return url;
   }
-}
-
-/**
- * 最小渲染：按 ``` 切开，代码块用等宽 + 底色，正文按原样保留换行，图片折叠成标记。
- *
- * 刻意**不**引入 markdown 渲染库：那是一个依赖决定，该由本人拍。
- * 这个版本把最要紧的区分（代码 vs 正文）做出来了，标题会以 `## ` 原样出现
- * ——看着糙，但那反而让文章结构一眼可见。装了 react-markdown 会好很多。
- */
-function renderBody(markdown: string): ReactElement[] {
-  const chunks = markdown.split("```");
-  return chunks.map((chunk, i) => {
-    if (i % 2 === 1) {
-      // 奇数块在一对 ``` 之间 = 代码。第一行可能是语言标记，去掉它
-      const nl = chunk.indexOf("\n");
-      const code = nl >= 0 ? chunk.slice(nl + 1) : chunk;
-      return (
-        <pre
-          key={i}
-          style={{
-            backgroundColor: "#f6f8fa",
-            border: "1px solid #e1e4e8",
-            borderRadius: "4px",
-            padding: "10px 12px",
-            overflowX: "auto",
-            fontSize: "13px",
-            lineHeight: 1.5,
-            margin: "10px 0",
-          }}
-        >
-          {code}
-        </pre>
-      );
-    }
-    // 图片折叠：materials 里的图片 URL 极长，展开会把正文冲散
-    const prose = chunk.replace(/!\[[^\]]*\]\([^)]*\)/g, "〔图〕");
-    return (
-      <div key={i} style={{ whiteSpace: "pre-wrap", fontSize: "15px", lineHeight: 1.85 }}>
-        {prose}
-      </div>
-    );
-  });
 }
 
 /**
@@ -171,29 +151,160 @@ function NoteEditor({ busy, onSubmit }: { busy: boolean; onSubmit: (text: string
   );
 }
 
+/** 一行的展示数据：不管来自哪一段，渲染逻辑相同，只有 tag 文案不同。 */
+interface ListRow {
+  id: string;
+  title: string;
+  source: string;
+  tag: string;
+}
+
+/**
+ * 左侧可浏览列表：推送池（孤岛 / 留档）在前，已有**标注**的材料在后。
+ *
+ * 「界面必须支持浏览，不能只有搜索」——`GET /api/materials/pool` 按定义排除已消化的材料，
+ * 只用它会导致写完标注那一刻材料从界面消失、正文再也打不开（本人实测撞过）。
+ * 所以这里同时拿两个端点，在前端按 id 合并。
+ *
+ * 筛选框的 state 落在这个组件自己身上，不落在 Read 里：
+ * 与 NoteEditor 同一个理由——打字不该触发 Read 重渲染（尤其是右侧那份可能有几百个
+ * markdown 块的正文）。这里必然要重渲染的是这个列表本身（筛选就是要增减可见行），
+ * 但那本来就是这个组件的全部职责，不是「意外牵连」。
+ */
+function MaterialListPanel({
+  pool,
+  materials,
+  todayId,
+  openId,
+  onOpen,
+}: {
+  pool: PoolItem[];
+  materials: Material[];
+  todayId: string | null;
+  openId: string | null;
+  onOpen: (id: string) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+
+  const poolIds = new Set(pool.map((p) => p.id));
+  const inPool: ListRow[] = pool.map((p) => ({ id: p.id, title: p.title, source: p.source, tag: p.kind }));
+  const annotated: ListRow[] = materials
+    .filter((m) => !poolIds.has(m.id))
+    .map((m) => ({ id: m.id, title: m.title, source: m.source, tag: "已标注" }));
+
+  const matches = (r: ListRow) => q === "" || r.title.toLowerCase().includes(q);
+  const filteredPool = inPool.filter(matches);
+  const filteredAnnotated = annotated.filter(matches);
+
+  const row = (r: ListRow) => (
+    <button
+      key={r.id}
+      onClick={() => onOpen(r.id)}
+      style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
+        padding: "8px 10px",
+        marginBottom: "4px",
+        border: `1px solid ${r.id === todayId ? "#4caf50" : openId === r.id ? "#007bff" : "#eee"}`,
+        borderRadius: "4px",
+        backgroundColor: r.id === todayId ? "#f1f8e9" : openId === r.id ? "#f0f7ff" : "white",
+        cursor: "pointer",
+        fontSize: "14px",
+        lineHeight: 1.5,
+        wordBreak: "break-word",
+      }}
+    >
+      {r.title}
+      <span style={{ display: "block", fontSize: "11px", color: "#aaa", marginTop: "2px" }}>
+        {r.tag} · {hostnameOf(r.source)}
+      </span>
+    </button>
+  );
+
+  const nothingAtAll = pool.length === 0 && materials.length === 0;
+  const nothingMatches = !nothingAtAll && filteredPool.length === 0 && filteredAnnotated.length === 0;
+
+  return (
+    <>
+      <input
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="按标题筛选"
+        style={{
+          width: "100%",
+          padding: "7px 10px",
+          fontSize: "13px",
+          fontFamily: "inherit",
+          border: "1px solid #ccc",
+          borderRadius: "4px",
+          marginBottom: "8px",
+          boxSizing: "border-box",
+        }}
+      />
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          // overscrollBehavior: contain 断掉滚动链：不加的话列表滚到底之后，
+          // 滚轮会继续滚外层——而正文那一栏很长，那次滚动要重绘大量 pre-wrap 文本。
+          overscrollBehavior: "contain",
+          // contain: paint 告诉浏览器这个盒子内部的重绘不会影响外面，
+          // 滚动时的重绘范围被限死在这 300px 宽的框里。
+          contain: "paint",
+        }}
+      >
+        {nothingAtAll && (
+          <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>库里还没有材料。</div>
+        )}
+        {nothingMatches && (
+          <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>没有匹配的标题。</div>
+        )}
+        {filteredPool.map(row)}
+        {filteredPool.length > 0 && filteredAnnotated.length > 0 && (
+          <div style={{ borderTop: "1px solid #ddd", margin: "8px 0" }} />
+        )}
+        {filteredAnnotated.map(row)}
+      </div>
+    </>
+  );
+}
+
 export function Read({ active }: { active: boolean }) {
   const [pool, setPool] = useState<PoolItem[] | null>(null);
+  const [materials, setMaterials] = useState<Material[]>([]);
   const [todayId, setTodayId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDrop, setConfirmDrop] = useState(false);
+  // 预练不是第四个终态，是阅读视图里的一次岔出：右侧内容换成 <Drill>，
+  // 退出时换回来。放在 Read 而不是 Drill 自己记，是因为「切到哪篇材料」
+  // 这件事本来就由 Read 管，drilling 只是「当前这篇材料显示成哪种视图」。
+  const [drilling, setDrilling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
   const loadPool = useCallback(async () => {
     try {
-      const [poolRes, todayRes] = await Promise.all([
+      // 同时拉推送池与全部材料：左侧列表要能浏览已消化的材料，不能只有池子里的。
+      // 见 CLAUDE.md「界面必须支持浏览」的第三条推论。
+      const [poolRes, todayRes, matRes] = await Promise.all([
         fetch(`${API}/api/materials/pool`),
         fetch(`${API}/api/push/today`),
+        fetch(`${API}/api/materials`),
       ]);
       if (!poolRes.ok) throw new Error(`GET /api/materials/pool → ${poolRes.status}`);
+      if (!matRes.ok) throw new Error(`GET /api/materials → ${matRes.status}`);
       const poolBody: unknown = await poolRes.json();
       const items =
         isRecord(poolBody) && Array.isArray(poolBody.candidates)
           ? poolBody.candidates.filter(isPoolItem)
           : [];
       setPool(items);
+      setMaterials(parseMaterials(await matRes.json()));
       setError(null);
 
       if (todayRes.ok) {
@@ -215,6 +326,7 @@ export function Read({ active }: { active: boolean }) {
     setDetail(null);
     setConfirmDrop(false);
     setDone(null);
+    setDrilling(false);
     try {
       const res = await fetch(`${API}/api/materials/${id}`);
       if (!res.ok) throw new Error(`GET /api/materials/${id} → ${res.status}`);
@@ -248,6 +360,7 @@ export function Read({ active }: { active: boolean }) {
       if (path === "drop") {
         setDetail(null);
         setOpenId(null);
+        setDrilling(false);
       } else if (path === "annotate") {
         await open(openId);
       }
@@ -296,53 +409,13 @@ export function Read({ active }: { active: boolean }) {
             今天推送的是下面高亮那篇
           </div>
         )}
-        {/* overscrollBehavior: contain 断掉滚动链：不加的话列表滚到底之后，
-            滚轮会继续滚外层——而正文那一栏很长，那次滚动要重绘大量 pre-wrap 文本。 */}
-        <div
-          style={{
-            flex: 1,
-            minHeight: 0,
-            overflowY: "auto",
-            overscrollBehavior: "contain",
-            // contain: paint 告诉浏览器这个盒子内部的重绘不会影响外面，
-            // 滚动时的重绘范围被限死在这 300px 宽的框里。
-            // 刻意不用 will-change: transform——那会永久占一个合成层，
-            // 而这里只有 46 个按钮，用不上那么重的手段。
-            contain: "paint",
-          }}
-        >
-          {pool.length === 0 && (
-            <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>
-              没有待处理的<strong>材料</strong>——都消化过了。
-            </div>
-          )}
-          {pool.map((m) => (
-            <button
-              key={m.id}
-              onClick={() => void open(m.id)}
-              style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: "8px 10px",
-                marginBottom: "4px",
-                border: `1px solid ${m.id === todayId ? "#4caf50" : openId === m.id ? "#007bff" : "#eee"}`,
-                borderRadius: "4px",
-                backgroundColor:
-                  m.id === todayId ? "#f1f8e9" : openId === m.id ? "#f0f7ff" : "white",
-                cursor: "pointer",
-                fontSize: "14px",
-                lineHeight: 1.5,
-                wordBreak: "break-word",
-              }}
-            >
-              {m.title}
-              <span style={{ display: "block", fontSize: "11px", color: "#aaa", marginTop: "2px" }}>
-                {m.kind} · {hostnameOf(m.source)}
-              </span>
-            </button>
-          ))}
-        </div>
+        <MaterialListPanel
+          pool={pool}
+          materials={materials}
+          todayId={todayId}
+          openId={openId}
+          onOpen={(id) => void open(id)}
+        />
       </div>
 
       {/* 右：读 + 三个终态 */}
@@ -389,7 +462,9 @@ export function Read({ active }: { active: boolean }) {
               </div>
             )}
 
-            {/* 三个终态的控件都在默认视图里——决定所需的控件藏起来就等于不存在 */}
+            {/* 三个终态的控件 + 预练入口都在默认视图里——决定所需的控件藏起来就等于不存在。
+                预练不是第四个终态（ADR-0011：它不改孤岛判据、不进推送池），
+                所以画在同一排但样式上不归入「确认删除」那组危险动作。 */}
             <div style={{ borderTop: "1px solid #eee", paddingTop: "14px", marginBottom: "18px" }}>
               <NoteEditor busy={busy} onSubmit={(text) => void act("annotate", { text }, "标注已写入")} />
               <div style={{ display: "flex", gap: "10px", marginTop: "10px", alignItems: "center" }}>
@@ -410,6 +485,12 @@ export function Read({ active }: { active: boolean }) {
                     </button>
                   </>
                 )}
+                <button onClick={() => setDrilling(true)} disabled={busy} style={btn("#673ab7")}>
+                  预练
+                </button>
+                <span style={{ fontSize: "11px", color: "#999" }}>
+                  完整入口在「预练」标签，那边列的是全部材料
+                </span>
                 {done !== null && <span style={{ color: "#4caf50", fontSize: "13px" }}>{done}</span>}
                 {error !== null && <span style={{ color: "#c33", fontSize: "13px" }}>{error}</span>}
               </div>
@@ -420,7 +501,13 @@ export function Read({ active }: { active: boolean }) {
               )}
             </div>
 
-            <div style={{ borderTop: "1px solid #eee", paddingTop: "14px" }}>{body}</div>
+            {drilling ? (
+              <div style={{ borderTop: "1px solid #eee", paddingTop: "14px" }}>
+                <Drill materialId={detail.id} markdown={detail.markdown} onExit={() => setDrilling(false)} />
+              </div>
+            ) : (
+              <div style={{ borderTop: "1px solid #eee", paddingTop: "14px" }}>{body}</div>
+            )}
           </div>
         )}
       </div>

@@ -17,6 +17,10 @@ import { MissingApiKey } from "./model/keywords.js";
 import { appendArchived } from "./materials/archive.js";
 import { dropMaterial, MaterialNotFound } from "./materials/drop.js";
 import { computePool, pickForPush } from "./push/pool.js";
+import { listDrills } from "./drills/list.js";
+import { DrillExtractFailed } from "./model/extract-drills.js";
+import { appendDrillRecord, readDrillVerdicts } from "./drills/records.js";
+import { readCachedDrills } from "./drills/cache.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -116,6 +120,9 @@ async function readPendingInbox(inboxBookmarksPath?: string): Promise<{
 export function createApp(
   inboxBookmarksPath?: string,
   distillFn?: (noteText: string) => Promise<string>,
+  extractDrillsFn?: (
+    candidates: { line: number; text: string }[],
+  ) => Promise<{ line: number; question: string }[]>,
 ): Express {
 
   // 作业状态必须在 createApp 之内：原先是模块级的，于是所有 app 实例共享同一份，
@@ -646,6 +653,162 @@ export function createApp(
       if (err instanceof EmptyAnnotation || err instanceof MissingHostMaterial) {
         return res.status(400).json({ error: err.message });
       }
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/materials/:id/drills
+   * 一份材料的**练题**清单（提取自正文、带定位锚点），合并每道题上次自评的会/不会。
+   * 缓存命中就不调模型——见 `drills/list.ts`。供「阅读」视图的**预练**入口使用。
+   *
+   * Response: 200 { materialId, drills: [{ id, question, anchor, anchorLine, lastKnown }] }
+   *           404 材料不存在
+   *           502 { error, code: "drill_extract_failed" } 提取失败（含缺 API key 的情况——
+   *             对调用方而言都是「这次要不到练题清单」，处置相同：提示稍后重试）
+   */
+  app.get("/api/materials/:id/drills", async (req: Request, res: Response) => {
+    try {
+      const materialId = req.params.id;
+      if (typeof materialId !== "string") {
+        return res.status(404).json({ error: "Material not found" });
+      }
+
+      const index = await buildMaterialsIndex();
+      const material = getMaterial(index, materialId);
+      if (!material) {
+        return res.status(404).json({ error: `Material ${materialId} not found` });
+      }
+
+      const drills = await listDrills(materialId, material.markdown, extractDrillsFn);
+
+      res.json({
+        materialId,
+        drills: drills.map((d) => ({
+          id: d.id,
+          question: d.question,
+          anchor: d.anchor,
+          anchorLine: d.anchorLine,
+          lastKnown: d.lastKnown,
+        })),
+      });
+    } catch (err) {
+      if (err instanceof DrillExtractFailed || err instanceof MissingApiKey) {
+        return res.status(502).json({ error: err.message, code: "drill_extract_failed" });
+      }
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/drills/record
+   * 记一条**练题记录**（本人对一道练题的一次自评：会 / 不会）。不进复习调度、
+   * 不进推送池（ADR-0011）——这里只管落盘。
+   *
+   * **drillId 刻意放 body 而不是 URL**：drillId 形如 `材料id#锚点slug`，含 `#`，
+   * 放进 URL 路径会被浏览器/服务端当成 fragment 分隔符截断，服务端根本收不到完整 id。
+   *
+   * Request body: { drillId: string, materialId: string, known: boolean }
+   * Response: { ok: true } (201)；body 形状不对 400
+   */
+  app.post("/api/drills/record", async (req: Request, res: Response) => {
+    try {
+      // 手写 typeof 收窄读 body 字段，不用 `as` 断言——外部输入不可信
+      const body: unknown = req.body;
+      let drillId: string | undefined;
+      let materialId: string | undefined;
+      let known: boolean | undefined;
+      if (typeof body === "object" && body !== null) {
+        if ("drillId" in body && typeof body.drillId === "string") drillId = body.drillId;
+        if ("materialId" in body && typeof body.materialId === "string") {
+          materialId = body.materialId;
+        }
+        if ("known" in body && typeof body.known === "boolean") known = body.known;
+      }
+
+      if (drillId === undefined || !drillId.trim()) {
+        return res.status(400).json({ error: "Missing or empty drillId" });
+      }
+      if (materialId === undefined || !materialId.trim()) {
+        return res.status(400).json({ error: "Missing or empty materialId" });
+      }
+      if (known === undefined) {
+        return res.status(400).json({ error: "Missing or invalid known" });
+      }
+
+      await appendDrillRecord({ drillId, materialId, known, at: new Date().toISOString() });
+      return res.status(201).json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * GET /api/drills/status
+   * 全部**材料**的**预练**状态概览，供「预练」标签页用来列出全部材料——
+   * 不能用 `GET /api/materials/pool`：池子按定义排除已被**标注**指向的材料
+   * （`computePool` 会过滤掉），于是一写标注那篇材料就从池子消失，
+   * 没法回去继续预练同一份材料里剩下的**练题**。这里改用 `listMaterials`，
+   * 顺序稳定（按标题排序）是它的功能而非细节，见 CLAUDE.md。
+   *
+   * **绝对不在这里调模型。** 未缓存的材料只报 `cached: false` + 三个 0；
+   * 真正的提取只在 `GET /api/materials/:id/drills`（用户点开某一篇材料的预练时）
+   * 发生。这个端点一次请求要遍历全部材料，顺手提取会在一次请求里
+   * 触发几十次 DeepSeek 调用——那是「材料不出题」同一类错误的镜像版本
+   * （这里是「浏览不该触发生成」）。
+   *
+   * `readDrillVerdicts()` 只读一次 `drill-records.jsonl`，不在循环里对每份材料重读。
+   *
+   * Response: 200 { materials: [{ materialId, title, cached, total, unknown, unattempted }] }
+   *   `total` 不一定等于 `unknown + unattempted`——标了「会」的练题两者都不算。
+   */
+  app.get("/api/drills/status", async (req: Request, res: Response) => {
+    try {
+      const index = await buildMaterialsIndex();
+      const materials = listMaterials(index);
+      const verdicts = await readDrillVerdicts();
+
+      const statuses = await Promise.all(
+        materials.map(async (m) => {
+          const drills = await readCachedDrills(m.id);
+          if (drills === null) {
+            return {
+              materialId: m.id,
+              title: m.title,
+              cached: false,
+              total: 0,
+              unknown: 0,
+              unattempted: 0,
+            };
+          }
+
+          let unknown = 0;
+          let unattempted = 0;
+          for (const d of drills) {
+            const record = verdicts.get(d.id);
+            if (record === undefined) {
+              unattempted += 1;
+            } else if (record.known === false) {
+              unknown += 1;
+            }
+          }
+
+          return {
+            materialId: m.id,
+            title: m.title,
+            cached: true,
+            total: drills.length,
+            unknown,
+            unattempted,
+          };
+        }),
+      );
+
+      res.json({ materials: statuses });
+    } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       return res.status(500).json({ error: message });
     }

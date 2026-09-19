@@ -2,8 +2,9 @@ import { useState, useCallback } from "react";
 import { App } from "./App.js";
 import { Attach } from "./Attach.js";
 import { Read } from "./Read.js";
+import { DrillHome } from "./DrillHome.js";
 
-type View = "阅读" | "过闸" | "归属";
+type View = "阅读" | "过闸" | "归属" | "预练";
 
 /**
  * 顶层视图切换。
@@ -66,6 +67,7 @@ export function Root() {
         {tab("阅读")}
         {tab("过闸")}
         {tab("归属", pending)}
+        {tab("预练")}
       </div>
 
       {/* 「阅读」刻意不带数字徽标：待处理几十篇这个数字每天糊在眼前，
@@ -97,6 +99,14 @@ export function Root() {
           候选是 BM25 直出的前三个，不调模型。
         </p>
         <Attach active={view === "归属"} onPendingCount={handlePendingCount} />
+      </div>
+      <div style={{ display: view === "预练" ? "block" : "none", padding: "0 20px", flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <h1 style={{ marginBottom: "6px" }}>Zhandao 预练</h1>
+        <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
+          考前工具，与闭环的出题 / 答题是两条链路：就一份<strong>材料</strong>里现成的
+          <strong>练题</strong>逐道作答、自评会不会，不进推送池、不改<strong>孤岛</strong>判据。
+        </p>
+        <DrillHome active={view === "预练"} />
       </div>
     </div>
   );

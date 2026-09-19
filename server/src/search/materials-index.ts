@@ -124,10 +124,15 @@ function parseMaterialFile(
 
   // 提取正文（frontmatter 后面，跳过第一个空行）
   const markdownLines = lines.slice(endIdx + 1);
-  // 去掉开头的空行
+  // 去掉开头的空行。
+  // 注意这里必须是 `first !== undefined` 而不是 `first`：空字符串本身就是 falsy，
+  // 写成 `if (first && ...)` 时条件永远不成立，这段从 2026-09-19 之前一直是死代码，
+  // 于是每一份材料的 markdown 都带着一个多余的开头空行。
+  // 修它的时机重要：**练题**的 anchorLine 一旦缓存下来，再修会让全部锚点整体偏移一行，
+  // 而偏移是静默的（揭晓时显示错的那一节）。所以在第一份练题清单落盘之前修掉。
   while (markdownLines.length > 0) {
     const first = markdownLines[0];
-    if (first && first.trim() === "") {
+    if (first !== undefined && first.trim() === "") {
       markdownLines.shift();
     } else {
       break;

@@ -929,3 +929,268 @@ describe("Notes routes (归属)", () => {
     assert.strictEqual(body.candidates.length, 2);
   });
 });
+
+describe("Drills routes (预练)", () => {
+  let tempDir: string;
+  let bookmarksFile: string;
+  let server: Server;
+  let port: number;
+  let dataDir: string;
+  // 可在每条测试里重新赋值的提取实现：不许真的调 DeepSeek，形状照抄
+  // 「Notes routes (归属)」那组测试里 distillImpl 的注入方式。
+  let extractImpl: (
+    candidates: { line: number; text: string }[],
+  ) => Promise<{ line: number; question: string }[]>;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "zhandao-drills-test-"));
+    bookmarksFile = join(tempDir, "Bookmarks");
+    dataDir = await mkdtemp(join(tmpdir(), "zhandao-drills-data-test-"));
+    process.env.ZHANDAO_DATA_DIR = dataDir;
+
+    const testBookmarks = {
+      roots: { bookmark_bar: { type: "folder", name: "书签栏", children: [] } },
+    };
+    await writeFile(bookmarksFile, JSON.stringify(testBookmarks, null, 2));
+
+    extractImpl = async () => [];
+
+    const app = createApp(bookmarksFile, undefined, async (candidates) => {
+      return extractImpl(candidates);
+    });
+    server = await new Promise<Server>((resolveFn) => {
+      const srv = app.listen(0, () => {
+        const address = srv.address();
+        if (address === null || typeof address === "string") {
+          throw new Error("expected AddressInfo from server.address()");
+        }
+        port = address.port;
+        resolveFn(srv);
+      });
+    });
+  });
+
+  afterEach(async () => {
+    return new Promise<void>((resolveFn) => {
+      server.close(async () => {
+        try {
+          await rm(dataDir, { recursive: true, force: true });
+        } catch {
+          // 忽略清理错误
+        }
+        delete process.env.ZHANDAO_DATA_DIR;
+        resolveFn();
+      });
+    });
+  });
+
+  test("GET /api/materials/:id/drills 正常返回，附带定位后的锚点信息", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "面试题合集",
+      markdown: "### 什么是闭包？\n\n闭包是……",
+      source: "https://example.com/interview",
+    });
+
+    extractImpl = async () => [{ line: 0, question: "什么是闭包？" }];
+
+    const res = await fetch(`http://localhost:${port}/api/materials/${material.id}/drills`);
+    assert.strictEqual(res.status, 200);
+
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.strictEqual(body.materialId, material.id);
+    assert.ok(Array.isArray(body.drills));
+    assert.strictEqual(body.drills.length, 1);
+    const drill = body.drills[0];
+    assert.ok(isRecord(drill));
+    assert.strictEqual(drill.question, "什么是闭包？");
+    assert.strictEqual(drill.anchor, "### 什么是闭包？");
+    // 0 = 正文第一行。这里曾经是 1，因为 `search/materials-index.ts` 的「去掉开头空行」
+    // 是段死代码（`if (first && ...)` 里空字符串本身 falsy），每份材料都多带一个开头空行。
+    // 已于 2026-09-19 修掉，时机是刻意的：anchorLine 一旦被缓存进 `.cache/drills-*.json`，
+    // 再修就会让全部锚点静默偏移一行（揭晓时显示错的那一节）。
+    assert.strictEqual(drill.anchorLine, 0);
+    assert.strictEqual(drill.lastKnown, null);
+    assert.ok(typeof drill.id === "string" && drill.id.startsWith(`${material.id}#`));
+  });
+
+  test("GET /api/materials/:id/drills 材料不存在返回 404", async () => {
+    const res = await fetch(`http://localhost:${port}/api/materials/nonexistent-id/drills`);
+    assert.strictEqual(res.status, 404);
+  });
+
+  test("GET /api/materials/:id/drills 提取失败返回 502 且带 code", async () => {
+    const { DrillExtractFailed } = await import("./model/extract-drills.js");
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "提取会失败的材料",
+      markdown: "正文",
+      source: "https://example.com/fail",
+    });
+
+    extractImpl = async () => {
+      throw new DrillExtractFailed("模拟提取失败");
+    };
+
+    const res = await fetch(`http://localhost:${port}/api/materials/${material.id}/drills`);
+    assert.strictEqual(res.status, 502);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.strictEqual(body.code, "drill_extract_failed");
+    assert.ok(hasErrorField(body));
+  });
+
+  test("POST /api/drills/record 正常记录返回 201", async () => {
+    const res = await fetch(`http://localhost:${port}/api/drills/record`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drillId: "mat1#q1", materialId: "mat1", known: true }),
+    });
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(parseOkResponse(await res.json()), true);
+
+    const { readDrillVerdicts } = await import("./drills/records.js");
+    const verdicts = await readDrillVerdicts();
+    assert.strictEqual(verdicts.get("mat1#q1")?.known, true);
+  });
+
+  test("POST /api/drills/record 缺 drillId 返回 400", async () => {
+    const res = await fetch(`http://localhost:${port}/api/drills/record`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ materialId: "mat1", known: true }),
+    });
+    assert.strictEqual(res.status, 400);
+    assert.ok(hasErrorField(await res.json()));
+  });
+
+  test("POST /api/drills/record 缺 known 返回 400", async () => {
+    const res = await fetch(`http://localhost:${port}/api/drills/record`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drillId: "mat1#q1", materialId: "mat1" }),
+    });
+    assert.strictEqual(res.status, 400);
+    assert.ok(hasErrorField(await res.json()));
+  });
+
+  test("POST /api/drills/record materialId 不是字符串返回 400", async () => {
+    const res = await fetch(`http://localhost:${port}/api/drills/record`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drillId: "mat1#q1", materialId: 123, known: true }),
+    });
+    assert.strictEqual(res.status, 400);
+  });
+
+  test("GET /api/drills/status 没有任何缓存时返回全部材料且 cached:false、三个计数都是 0", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    const material = await writeMaterial({
+      title: "从未预练过的材料",
+      markdown: "正文",
+      source: "https://example.com/untouched",
+    });
+
+    const res = await fetch(`http://localhost:${port}/api/drills/status`);
+    assert.strictEqual(res.status, 200);
+
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.ok(Array.isArray(body.materials));
+    assert.strictEqual(body.materials.length, 1);
+    const status = body.materials[0];
+    assert.ok(isRecord(status));
+    assert.strictEqual(status.materialId, material.id);
+    assert.strictEqual(status.title, "从未预练过的材料");
+    assert.strictEqual(status.cached, false);
+    assert.strictEqual(status.total, 0);
+    assert.strictEqual(status.unknown, 0);
+    assert.strictEqual(status.unattempted, 0);
+  });
+
+  test("GET /api/drills/status 有缓存与记录时 total / unknown / unattempted 三个数都对", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    const { cacheDrills } = await import("./drills/cache.js");
+    const { appendDrillRecord: appendRecord } = await import("./drills/records.js");
+
+    const material = await writeMaterial({
+      title: "练过一部分的材料",
+      markdown: "### 第一题\n\n### 第二题\n\n### 第三题\n",
+      source: "https://example.com/partial",
+    });
+
+    // 构造「1 道标会、1 道标不会、1 道没练过」的场景
+    const drills = [
+      {
+        id: `${material.id}#q1`,
+        materialId: material.id,
+        question: "第一题？",
+        anchor: "### 第一题",
+        anchorLine: 0,
+      },
+      {
+        id: `${material.id}#q2`,
+        materialId: material.id,
+        question: "第二题？",
+        anchor: "### 第二题",
+        anchorLine: 2,
+      },
+      {
+        id: `${material.id}#q3`,
+        materialId: material.id,
+        question: "第三题？",
+        anchor: "### 第三题",
+        anchorLine: 4,
+      },
+    ];
+    await cacheDrills(material.id, drills);
+    await appendRecord({
+      drillId: `${material.id}#q1`,
+      materialId: material.id,
+      known: true,
+      at: new Date().toISOString(),
+    });
+    await appendRecord({
+      drillId: `${material.id}#q2`,
+      materialId: material.id,
+      known: false,
+      at: new Date().toISOString(),
+    });
+    // q3 没有任何记录 —— 从没练过
+
+    const res = await fetch(`http://localhost:${port}/api/drills/status`);
+    assert.strictEqual(res.status, 200);
+
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.ok(Array.isArray(body.materials));
+    const status = body.materials.find(
+      (m): m is Record<string, unknown> => isRecord(m) && m.materialId === material.id,
+    );
+    assert.ok(status);
+    assert.strictEqual(status.cached, true);
+    assert.strictEqual(status.total, 3);
+    assert.strictEqual(status.unknown, 1);
+    assert.strictEqual(status.unattempted, 1);
+  });
+
+  test("GET /api/drills/status 绝不调模型提取（守卫：注入的提取实现调用次数为 0）", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    await writeMaterial({
+      title: "不该触发提取的材料",
+      markdown: "### 一个问题？\n\n正文",
+      source: "https://example.com/no-model-call",
+    });
+
+    let extractCalls = 0;
+    extractImpl = async () => {
+      extractCalls += 1;
+      return [];
+    };
+
+    const res = await fetch(`http://localhost:${port}/api/drills/status`);
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(extractCalls, 0);
+  });
+});
