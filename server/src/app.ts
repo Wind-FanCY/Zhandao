@@ -466,6 +466,11 @@ export function createApp(
         id: m.id,
         title: m.title,
         source: m.source,
+        // `from` = 展开出这份**材料**的**索引页**（ADR-0010），供前端按系列分组折叠。
+        // 那份 ADR 的 Consequences 早就点了名：同一系列的材料词汇高度重合、列表区分度低，
+        // 「缓解在呈现层：候选里显示 from」。实测 49 篇里 41 篇共用一个 from，
+        // 不分组的话整张列表 84% 是一堵同质的墙。非每份材料都有，可缺省。
+        from: m.from,
       }));
       res.json({ materials });
     } catch (err) {
@@ -778,6 +783,8 @@ export function createApp(
             return {
               materialId: m.id,
               title: m.title,
+              // 供前端按**索引页**分组折叠，理由同 `GET /api/materials`（ADR-0010）
+              from: m.from,
               cached: false,
               total: 0,
               unknown: 0,
@@ -799,6 +806,7 @@ export function createApp(
           return {
             materialId: m.id,
             title: m.title,
+            from: m.from,
             cached: true,
             total: drills.length,
             unknown,

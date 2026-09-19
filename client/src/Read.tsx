@@ -19,11 +19,16 @@ interface PoolItem {
   since: string;
 }
 
-/** 全部材料（不限于推送池），供左侧列表补全「已标注」那一段。与 Attach.tsx 的 Material 同形状。 */
+/**
+ * 全部材料（不限于推送池），供左侧列表补全「已标注」那一段。与 Attach.tsx 的 Material 同形状，
+ * 多一个可选的 `from`——供本文件按**索引页**分组折叠用。呈现层专用字段：不进任何数据模型、
+ * 不算关联、不影响孤岛判定（ADR-0010 硬线）。
+ */
 interface Material {
   id: string;
   title: string;
   source: string;
+  from?: string;
 }
 
 interface Annotation {
@@ -61,6 +66,8 @@ function isMaterial(v: unknown): v is Material {
   for (const k of ["id", "title", "source"]) {
     if (!(k in v) || typeof v[k] !== "string") return false;
   }
+  // from 可选：缺省合法（不是每份材料都从索引页展开出来），存在时必须是字符串
+  if ("from" in v && v.from !== undefined && typeof v.from !== "string") return false;
   return true;
 }
 
@@ -98,6 +105,44 @@ function hostnameOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** 组名：主机名 + 路径，不带协议。给不出合法 URL 时原样返回，别让分组崩掉。 */
+function groupLabel(from: string): string {
+  try {
+    const u = new URL(from);
+    return `${u.hostname}${u.pathname}`;
+  } catch {
+    return from;
+  }
+}
+
+/**
+ * 按 `from`（展开出这些条目的索引页）分组，纯呈现层的重排——`from` 不是分类、不是关联，
+ * 不进任何数据模型、不影响孤岛判定（ADR-0010 硬线，见 CLAUDE.md）。
+ * 只有同一 `from` 下 >= 2 条才成组，单独一条直接当独立行；组出现在其首个成员原本所在的
+ * 位置，组内保持原始相对顺序——两条约束合起来保证分组不改变列表原有顺序。
+ */
+type Grouped<T> = { kind: "single"; row: T } | { kind: "group"; from: string; rows: T[] };
+
+function groupByFrom<T extends { from?: string }>(rows: T[]): Grouped<T>[] {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if (r.from !== undefined) counts.set(r.from, (counts.get(r.from) ?? 0) + 1);
+  }
+  const emitted = new Set<string>();
+  const result: Grouped<T>[] = [];
+  for (const r of rows) {
+    const f = r.from;
+    if (f === undefined || (counts.get(f) ?? 0) < 2) {
+      result.push({ kind: "single", row: r });
+      continue;
+    }
+    if (emitted.has(f)) continue; // 已经作为组的一员出现过，跳过不重复渲染
+    emitted.add(f);
+    result.push({ kind: "group", from: f, rows: rows.filter((x) => x.from === f) });
+  }
+  return result;
 }
 
 /**
@@ -157,6 +202,8 @@ interface ListRow {
   title: string;
   source: string;
   tag: string;
+  /** 展开出这份材料的索引页，缺省表示单篇收录。只用于分组呈现，见 groupByFrom。 */
+  from?: string;
 }
 
 /**
@@ -186,12 +233,31 @@ function MaterialListPanel({
 }) {
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
+  // 已展开的组，键是 `${段名}:${from}`——两段各自分组、各自的展开状态互不影响
+  // （同一个 from 在池子段与已标注段可能各出现一次，见 CLAUDE.md「归属链路」旁的注记）。
+  // 纯组件自身 state：不提升到父组件，不持久化，刷新页面就回到全折叠。
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = (key: string) =>
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const poolIds = new Set(pool.map((p) => p.id));
-  const inPool: ListRow[] = pool.map((p) => ({ id: p.id, title: p.title, source: p.source, tag: p.kind }));
+  // pool 端点不带 from（服务端契约），按 id 去 materials 列表里查
+  const materialsById = new Map(materials.map((m) => [m.id, m]));
+  const inPool: ListRow[] = pool.map((p) => ({
+    id: p.id,
+    title: p.title,
+    source: p.source,
+    tag: p.kind,
+    from: materialsById.get(p.id)?.from,
+  }));
   const annotated: ListRow[] = materials
     .filter((m) => !poolIds.has(m.id))
-    .map((m) => ({ id: m.id, title: m.title, source: m.source, tag: "已标注" }));
+    .map((m) => ({ id: m.id, title: m.title, source: m.source, tag: "已标注", from: m.from }));
 
   const matches = (r: ListRow) => q === "" || r.title.toLowerCase().includes(q);
   const filteredPool = inPool.filter(matches);
@@ -222,6 +288,55 @@ function MaterialListPanel({
       </span>
     </button>
   );
+
+  /**
+   * 渲染一段（池子段或已标注段），按 from 分组、折叠。
+   * `keyPrefix` 区分两段各自的展开状态；分组基于**这一段完整的、未经标题筛选的列表**——
+   * 组头「N 篇」报的是这段里的系列总规模，筛选只决定组内哪些行可见，不改变这个数字。
+   * 筛选非空时：组内有匹配就强制展开、只画匹配的行；组头本身不可点
+   *（避免筛选期间的点击悄悄改动手动展开状态，导致清空筛选后组没有回到折叠态）。
+   */
+  const renderSegment = (segmentRows: ListRow[], keyPrefix: string) =>
+    groupByFrom(segmentRows).map((g) => {
+      if (g.kind === "single") {
+        return matches(g.row) ? row(g.row) : null;
+      }
+      const filtering = q !== "";
+      const visibleRows = filtering ? g.rows.filter(matches) : g.rows;
+      if (filtering && visibleRows.length === 0) return null; // 这个系列在筛选下没有命中，整组不画
+
+      const key = `${keyPrefix}:${g.from}`;
+      const open = filtering ? true : expandedGroups.has(key);
+      // 组头刻意只报「N 篇」，不报「池中几篇」：两段是各自分组的，池子段里那个数恒等于 N、
+      // 已标注段里恒为 0——在拆成两段之后它不携带任何信息，只是噪音。
+
+      return (
+        <div key={key} style={{ marginBottom: "4px" }}>
+          <button
+            onClick={filtering ? undefined : () => toggleGroup(key)}
+            disabled={filtering}
+            style={{
+              display: "block",
+              width: "100%",
+              textAlign: "left",
+              padding: "7px 10px",
+              border: "1px solid #ddd",
+              borderRadius: "4px",
+              backgroundColor: "#f5f5f5",
+              cursor: filtering ? "default" : "pointer",
+              fontSize: "13px",
+              color: "#555",
+            }}
+          >
+            {open ? "▾" : "▸"} {groupLabel(g.from)}
+            <span style={{ color: "#999", marginLeft: "6px" }}>
+              {g.rows.length} 篇
+            </span>
+          </button>
+          {open && <div style={{ paddingLeft: "14px" }}>{visibleRows.map(row)}</div>}
+        </div>
+      );
+    });
 
   const nothingAtAll = pool.length === 0 && materials.length === 0;
   const nothingMatches = !nothingAtAll && filteredPool.length === 0 && filteredAnnotated.length === 0;
@@ -262,11 +377,11 @@ function MaterialListPanel({
         {nothingMatches && (
           <div style={{ color: "#999", fontSize: "13px", padding: "8px" }}>没有匹配的标题。</div>
         )}
-        {filteredPool.map(row)}
+        {renderSegment(inPool, "pool")}
         {filteredPool.length > 0 && filteredAnnotated.length > 0 && (
           <div style={{ borderTop: "1px solid #ddd", margin: "8px 0" }} />
         )}
-        {filteredAnnotated.map(row)}
+        {renderSegment(annotated, "annotated")}
       </div>
     </>
   );

@@ -24,6 +24,11 @@ interface DrillStatusItem {
   unknown: number;
   /** 从没练过的条数 */
   unattempted: number;
+  /**
+   * 展开出这份材料的索引页，缺省表示单篇收录。只用于下面的分组折叠呈现——
+   * `from` 不是分类、不是关联，不进任何数据模型、不影响孤岛判定（ADR-0010 硬线）。
+   */
+  from?: string;
 }
 
 interface MaterialDetail {
@@ -48,6 +53,8 @@ function isDrillStatusItem(v: unknown): v is DrillStatusItem {
   if (!("total" in v) || typeof v.total !== "number") return false;
   if (!("unknown" in v) || typeof v.unknown !== "number") return false;
   if (!("unattempted" in v) || typeof v.unattempted !== "number") return false;
+  // from 可选：缺省合法（不是每份材料都从索引页展开出来），存在时必须是字符串
+  if ("from" in v && v.from !== undefined && typeof v.from !== "string") return false;
   return true;
 }
 
@@ -72,6 +79,44 @@ function errorMessageOf(body: unknown, status: number): string {
   return `HTTP ${status}`;
 }
 
+/** 组名：主机名 + 路径，不带协议。给不出合法 URL 时原样返回，别让分组崩掉。 */
+function groupLabel(from: string): string {
+  try {
+    const u = new URL(from);
+    return `${u.hostname}${u.pathname}`;
+  } catch {
+    return from;
+  }
+}
+
+/**
+ * 按 `from`（展开出这些条目的索引页）分组，纯呈现层的重排——`from` 不是分类、不是关联，
+ * 不进任何数据模型、不影响孤岛判定（ADR-0010 硬线，见 CLAUDE.md）。逻辑与 Read.tsx 的
+ * 同名函数一致：只有同一 from 下 >= 2 条才成组，组出现在首个成员原本所在的位置，
+ * 组内保持原始相对顺序。两个文件各自持有一份，不抽公共模块——改动范围明确限定在这两个文件。
+ */
+type Grouped<T> = { kind: "single"; row: T } | { kind: "group"; from: string; rows: T[] };
+
+function groupByFrom<T extends { from?: string }>(rows: T[]): Grouped<T>[] {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if (r.from !== undefined) counts.set(r.from, (counts.get(r.from) ?? 0) + 1);
+  }
+  const emitted = new Set<string>();
+  const result: Grouped<T>[] = [];
+  for (const r of rows) {
+    const f = r.from;
+    if (f === undefined || (counts.get(f) ?? 0) < 2) {
+      result.push({ kind: "single", row: r });
+      continue;
+    }
+    if (emitted.has(f)) continue;
+    emitted.add(f);
+    result.push({ kind: "group", from: f, rows: rows.filter((x) => x.from === f) });
+  }
+  return result;
+}
+
 function statusLabel(item: DrillStatusItem): string {
   if (!item.cached) return "未提取";
   if (item.total === 0) return "没有练题";
@@ -94,7 +139,102 @@ function MaterialsBrowser({
   onSelect: (item: DrillStatusItem) => void;
 }) {
   const [filter, setFilter] = useState("");
-  const shown = materials.filter((m) => m.title.toLowerCase().includes(filter.trim().toLowerCase()));
+  // 已展开的组，键是 from——组件自己的 state，不提升、不持久化，刷新页面回到全折叠。
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = (from: string) =>
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(from)) next.delete(from);
+      else next.add(from);
+      return next;
+    });
+
+  const q = filter.trim().toLowerCase();
+  const matches = (m: DrillStatusItem) => q === "" || m.title.toLowerCase().includes(q);
+  const shown = materials.filter(matches); // 只用于「没有匹配」这类空态提示，不用于渲染结构
+
+  // 视觉提示：还有「不会」或「没练过」的练题时给一点强调——
+  // 不是排序，只是让「哪些还有东西可练」在扫一眼时能认出来。
+  const renderRow = (m: DrillStatusItem) => {
+    const hasWork = m.unknown + m.unattempted > 0;
+    return (
+      <button
+        key={m.materialId}
+        onClick={() => onSelect(m)}
+        style={{
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          padding: "10px 12px",
+          marginBottom: "6px",
+          border: "1px solid #eee",
+          borderLeft: hasWork ? "4px solid #ff9800" : "4px solid transparent",
+          borderRadius: "4px",
+          backgroundColor: "white",
+          cursor: "pointer",
+          fontSize: "14px",
+          lineHeight: 1.5,
+        }}
+      >
+        <div style={{ wordBreak: "break-word" }}>{m.title}</div>
+        <div
+          style={{
+            fontSize: "12px",
+            color: hasWork ? "#c66a00" : "#999",
+            marginTop: "4px",
+            fontWeight: hasWork ? 600 : 400,
+          }}
+        >
+          {statusLabel(m)}
+        </div>
+      </button>
+    );
+  };
+
+  /**
+   * 分组基于**完整的、未经标题筛选的材料列表**——组头「N 篇」报的是这个系列的总规模，
+   * 筛选只决定组内哪些行可见，不改变这个数字。筛选非空时组内有匹配就强制展开、
+   * 只画匹配的行；组头本身不可点，避免筛选期间的点击悄悄改动手动展开状态，
+   * 导致清空筛选后组没有回到折叠态（与 Read.tsx 同一处理）。
+   */
+  const rendered = groupByFrom(materials).map((g) => {
+    if (g.kind === "single") {
+      return matches(g.row) ? renderRow(g.row) : null;
+    }
+    const filtering = q !== "";
+    const visibleRows = filtering ? g.rows.filter(matches) : g.rows;
+    if (filtering && visibleRows.length === 0) return null;
+
+    const open = filtering ? true : expandedGroups.has(g.from);
+    const stillPracticable = g.rows.filter((m) => m.unknown + m.unattempted > 0).length;
+
+    return (
+      <div key={g.from} style={{ marginBottom: "6px" }}>
+        <button
+          onClick={filtering ? undefined : () => toggleGroup(g.from)}
+          disabled={filtering}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "9px 12px",
+            border: "1px solid #ddd",
+            borderRadius: "4px",
+            backgroundColor: "#f5f5f5",
+            cursor: filtering ? "default" : "pointer",
+            fontSize: "14px",
+            color: "#555",
+          }}
+        >
+          {open ? "▾" : "▸"} {groupLabel(g.from)}
+          <span style={{ color: "#999", marginLeft: "6px", fontSize: "12px" }}>
+            {g.rows.length} 篇 · {stillPracticable} 篇还有可练的
+          </span>
+        </button>
+        {open && <div style={{ paddingLeft: "14px" }}>{visibleRows.map(renderRow)}</div>}
+      </div>
+    );
+  });
 
   return (
     <div>
@@ -121,43 +261,7 @@ function MaterialsBrowser({
             {materials.length === 0 ? "库里还没有材料。" : "没有标题匹配的材料。"}
           </div>
         )}
-        {shown.map((m) => {
-          // 视觉提示：还有「不会」或「没练过」的练题时给一点强调——
-          // 不是排序，只是让「哪些还有东西可练」在扫一眼时能认出来。
-          const hasWork = m.unknown + m.unattempted > 0;
-          return (
-            <button
-              key={m.materialId}
-              onClick={() => onSelect(m)}
-              style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: "10px 12px",
-                marginBottom: "6px",
-                border: "1px solid #eee",
-                borderLeft: hasWork ? "4px solid #ff9800" : "4px solid transparent",
-                borderRadius: "4px",
-                backgroundColor: "white",
-                cursor: "pointer",
-                fontSize: "14px",
-                lineHeight: 1.5,
-              }}
-            >
-              <div style={{ wordBreak: "break-word" }}>{m.title}</div>
-              <div
-                style={{
-                  fontSize: "12px",
-                  color: hasWork ? "#c66a00" : "#999",
-                  marginTop: "4px",
-                  fontWeight: hasWork ? 600 : 400,
-                }}
-              >
-                {statusLabel(m)}
-              </div>
-            </button>
-          );
-        })}
+        {rendered}
       </div>
     </div>
   );
