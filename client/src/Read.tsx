@@ -37,6 +37,19 @@ interface Annotation {
   at: string;
 }
 
+/**
+ * `GET /api/annotations` 的列表项——比材料详情里的 `Annotation` 多一个 `material` 字段
+ * （挂在哪份材料上，这个端点跨全部材料，需要这个字段才能分组）。
+ * `targets`（关联）原样带着，v1 恒为空数组，这里不展示、只是不丢字段。
+ */
+interface AnnotationListItem {
+  id: string;
+  material: string;
+  text: string;
+  at: string;
+  targets: string[];
+}
+
 interface MaterialDetail {
   id: string;
   title: string;
@@ -81,6 +94,24 @@ function isAnnotation(v: unknown): v is Annotation {
   return (
     typeof v.id === "string" && typeof v.text === "string" && typeof v.at === "string"
   );
+}
+
+function isAnnotationListItem(v: unknown): v is AnnotationListItem {
+  if (!isRecord(v)) return false;
+  if (typeof v.id !== "string" || typeof v.material !== "string") return false;
+  if (typeof v.text !== "string" || typeof v.at !== "string") return false;
+  if (!Array.isArray(v.targets) || !v.targets.every((t) => typeof t === "string")) return false;
+  return true;
+}
+
+function parseAnnotationList(payload: unknown): AnnotationListItem[] {
+  if (!isRecord(payload) || !Array.isArray(payload.annotations)) return [];
+  return payload.annotations.filter(isAnnotationListItem);
+}
+
+/** 列表里显示不下整条标注正文——这是列表不是阅读器，点进材料仍能看全文。 */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 function parseDetail(v: unknown): MaterialDetail | null {
@@ -204,6 +235,11 @@ interface ListRow {
   tag: string;
   /** 展开出这份材料的索引页，缺省表示单篇收录。只用于分组呈现，见 groupByFrom。 */
   from?: string;
+  /**
+   * 挂在这份材料上的**标注**正文，只在「已标注」段填充——池子段（孤岛/留档）
+   * 按定义没有标注。用于行下方展示，也参与标题筛选（见 matches）。
+   */
+  annotationTexts?: string[];
 }
 
 /**
@@ -221,12 +257,15 @@ interface ListRow {
 function MaterialListPanel({
   pool,
   materials,
+  annotationsByMaterial,
   todayId,
   openId,
   onOpen,
 }: {
   pool: PoolItem[];
   materials: Material[];
+  /** 材料 id → 挂在它上面的标注正文列表，按 at 升序（与 GET /api/annotations 一致）。 */
+  annotationsByMaterial: Map<string, string[]>;
   todayId: string | null;
   openId: string | null;
   onOpen: (id: string) => void;
@@ -257,9 +296,20 @@ function MaterialListPanel({
   }));
   const annotated: ListRow[] = materials
     .filter((m) => !poolIds.has(m.id))
-    .map((m) => ({ id: m.id, title: m.title, source: m.source, tag: "已标注", from: m.from }));
+    .map((m) => ({
+      id: m.id,
+      title: m.title,
+      source: m.source,
+      tag: "已标注",
+      from: m.from,
+      annotationTexts: annotationsByMaterial.get(m.id),
+    }));
 
-  const matches = (r: ListRow) => q === "" || r.title.toLowerCase().includes(q);
+  // 标题之外也匹配标注正文——你可能记得自己写过什么、却不记得它挂在哪篇材料上。
+  const matches = (r: ListRow) =>
+    q === "" ||
+    r.title.toLowerCase().includes(q) ||
+    (r.annotationTexts ?? []).some((t) => t.toLowerCase().includes(q));
   const filteredPool = inPool.filter(matches);
   const filteredAnnotated = annotated.filter(matches);
 
@@ -286,6 +336,23 @@ function MaterialListPanel({
       <span style={{ display: "block", fontSize: "11px", color: "#aaa", marginTop: "2px" }}>
         {r.tag} · {hostnameOf(r.source)}
       </span>
+      {/* 库里唯一值钱的那层——标注正文——显示在它挂靠的那一行下面，缩进 + 灰色小字区分于标题。
+          这是这个组件存在的直接理由：标注此前只能从「打开材料之后的详情」里看到。 */}
+      {(r.annotationTexts ?? []).map((t, i) => (
+        <span
+          key={i}
+          style={{
+            display: "block",
+            fontSize: "12px",
+            color: "#888",
+            marginTop: "3px",
+            paddingLeft: "10px",
+            borderLeft: "2px solid #e0e0e0",
+          }}
+        >
+          {truncate(t, 80)}
+        </span>
+      ))}
     </button>
   );
 
@@ -390,6 +457,7 @@ function MaterialListPanel({
 export function Read({ active }: { active: boolean }) {
   const [pool, setPool] = useState<PoolItem[] | null>(null);
   const [materials, setMaterials] = useState<Material[]>([]);
+  const [annotations, setAnnotations] = useState<AnnotationListItem[]>([]);
   const [todayId, setTodayId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
@@ -404,15 +472,18 @@ export function Read({ active }: { active: boolean }) {
 
   const loadPool = useCallback(async () => {
     try {
-      // 同时拉推送池与全部材料：左侧列表要能浏览已消化的材料，不能只有池子里的。
-      // 见 CLAUDE.md「界面必须支持浏览」的第三条推论。
-      const [poolRes, todayRes, matRes] = await Promise.all([
+      // 同时拉推送池、全部材料、全部标注：左侧列表要能浏览已消化的材料，不能只有池子里的；
+      // 标注同理——它此前唯一的浏览路径是「打开某篇材料之后的详情」，见 CLAUDE.md
+      // 「界面必须支持浏览」新增的那条推论。
+      const [poolRes, todayRes, matRes, annoRes] = await Promise.all([
         fetch(`${API}/api/materials/pool`),
         fetch(`${API}/api/push/today`),
         fetch(`${API}/api/materials`),
+        fetch(`${API}/api/annotations`),
       ]);
       if (!poolRes.ok) throw new Error(`GET /api/materials/pool → ${poolRes.status}`);
       if (!matRes.ok) throw new Error(`GET /api/materials → ${matRes.status}`);
+      if (!annoRes.ok) throw new Error(`GET /api/annotations → ${annoRes.status}`);
       const poolBody: unknown = await poolRes.json();
       const items =
         isRecord(poolBody) && Array.isArray(poolBody.candidates)
@@ -420,6 +491,7 @@ export function Read({ active }: { active: boolean }) {
           : [];
       setPool(items);
       setMaterials(parseMaterials(await matRes.json()));
+      setAnnotations(parseAnnotationList(await annoRes.json()));
       setError(null);
 
       if (todayRes.ok) {
@@ -491,6 +563,18 @@ export function Read({ active }: { active: boolean }) {
   // 依赖只有 detail——正文不可改（CONTEXT.md：材料正文是来源原文不可改）。
   const body = useMemo(() => (detail === null ? null : renderBody(detail.markdown)), [detail]);
 
+  // 按宿主材料分组标注正文，供左侧列表在「已标注」段的每一行下面显示。
+  // `GET /api/annotations` 已按 at 升序返回，这里只是分组、不改变组内顺序。
+  const annotationsByMaterial = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const a of annotations) {
+      const existing = map.get(a.material);
+      if (existing) existing.push(a.text);
+      else map.set(a.material, [a.text]);
+    }
+    return map;
+  }, [annotations]);
+
   if (error !== null && pool === null) {
     return <div style={{ padding: "20px", color: "#c33" }}>错误：{error}</div>;
   }
@@ -527,6 +611,7 @@ export function Read({ active }: { active: boolean }) {
         <MaterialListPanel
           pool={pool}
           materials={materials}
+          annotationsByMaterial={annotationsByMaterial}
           todayId={todayId}
           openId={openId}
           onOpen={(id) => void open(id)}

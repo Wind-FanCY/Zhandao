@@ -310,7 +310,7 @@ export function Drill({
       setRoundOutcomes((prev) => new Map(prev).set(drill.id, known));
       setPos((p) => p + 1);
     } catch (err) {
-      // 失败不推进：题目还停在原地，作答框（同一个 key）也还在，可以直接重点按钮重试
+      // 失败不推进：练题还停在原地，作答框（同一个 key）也还在，可以直接重点按钮重试
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);

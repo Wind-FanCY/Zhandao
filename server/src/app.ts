@@ -531,6 +531,37 @@ export function createApp(
   });
 
   /**
+   * GET /api/annotations
+   * 全部**标注**的列表，独立于任何一份**材料**。
+   *
+   * 存在的理由：`CLAUDE.md`「界面必须支持浏览」——库里唯一值钱的那层（标注）此前
+   * 一条浏览路径都没有，只能从「打开某篇材料之后的详情」里看到。
+   * 单开端点而不是把 `annotations` 塞进 `GET /api/materials`：
+   * 「列出全部标注」是一个独立的能力，塞进材料列表只会让那个端点的载荷随标注增长。
+   *
+   * 按 `at` 升序（最早的在前）：这条路径的目的之一是让本人发现「哪条已经想不起来了」，
+   * 而最老的那条最可能是那一条；顺序稳定也是它的功能——本人靠位置认条目。
+   */
+  app.get("/api/annotations", async (req: Request, res: Response) => {
+    try {
+      const annotations = await readAnnotations();
+      const sorted = [...annotations].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+      res.json({
+        annotations: sorted.map((a) => ({
+          id: a.id,
+          material: a.material,
+          text: a.text,
+          at: a.at,
+          targets: a.targets,
+        })),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
    * GET /api/materials/:id
    * 一份材料的全文（不裁剪）+ 挂在它上面的全部标注（按 at 升序）。
    * 阅读视图打开一篇待处理的材料时用这个端点。

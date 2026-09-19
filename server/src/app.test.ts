@@ -623,6 +623,49 @@ describe("Notes routes (归属)", () => {
     assert.deepStrictEqual(body.materials, []);
   });
 
+  test("GET /api/annotations 库为空时返回空数组", async () => {
+    const res = await fetch(`http://localhost:${port}/api/annotations`);
+    assert.strictEqual(res.status, 200);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    assert.deepStrictEqual(body.annotations, []);
+  });
+
+  test("GET /api/annotations 按 at 升序返回，字段齐全", async () => {
+    const { writeMaterial } = await import("./materials/write.js");
+    const { writeAnnotation } = await import("./annotations/write.js");
+
+    const material = await writeMaterial({
+      title: "材料甲",
+      markdown: "内容",
+      source: "https://example.com/a",
+    });
+
+    // 与 push/pool.test.ts 同一手法：writeAnnotation 内部用 Date.now() 打 at 时间戳，
+    // 两次顺序 await 调用之间时钟单调不减，先写的那条 at 更早——用天然时间差验证排序，
+    // 不需要也不能从外部注入 at（由 writeAnnotation 内部生成）。
+    const first = await writeAnnotation({ materialId: material.id, text: "先写的标注" });
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await writeAnnotation({ materialId: material.id, text: "后写的标注" });
+
+    const res = await fetch(`http://localhost:${port}/api/annotations`);
+    assert.strictEqual(res.status, 200);
+    const body: unknown = await res.json();
+    assert.ok(isRecord(body));
+    const { annotations } = body;
+    assert.ok(Array.isArray(annotations));
+    assert.strictEqual(annotations.length, 2);
+
+    const [a, b] = annotations;
+    assert.ok(isRecord(a) && isRecord(b));
+    assert.strictEqual(a.id, first.id);
+    assert.strictEqual(b.id, second.id);
+    assert.strictEqual(a.material, material.id);
+    assert.strictEqual(a.text, "先写的标注");
+    assert.strictEqual(typeof a.at, "string");
+    assert.deepStrictEqual(a.targets, []);
+  });
+
   test("GET /api/notes/pending 返回未处理的速记，附带候选材料", async () => {
     const { appendQuickNote } = await import("./quicknotes/append.js");
     const { writeMaterial } = await import("./materials/write.js");
