@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { writeMaterial } from "../materials/write.js";
 import { writeAnnotation } from "../annotations/write.js";
 import { appendArchived } from "../materials/archive.js";
+import { appendPush } from "./log.js";
 import { computePool, pickForPush } from "./pool.js";
 
 let testDataDir: string;
@@ -162,5 +163,75 @@ at: 2026-09-16T10:00:00.000Z
     assert.ok(picked);
     assert.equal(picked?.material.id, mat.id);
     assert.equal(picked?.kind, "孤岛");
+  });
+
+  test("轮转：三篇孤岛，推过第一篇之后，pickForPush 给出第二篇", async () => {
+    const a = await writeMaterial({ title: "A", markdown: "x", source: "https://a" });
+    await new Promise((r) => setTimeout(r, 5));
+    const b = await writeMaterial({ title: "B", markdown: "x", source: "https://b" });
+    await new Promise((r) => setTimeout(r, 5));
+    const c = await writeMaterial({ title: "C", markdown: "x", source: "https://c" });
+
+    // 改动前：pickForPush 会一直返回 A（池首按 captured 升序，A 最早）。
+    // 改动后：A 被推过一次，就该轮到「从没推过」里最早的 since，即 B。
+    await appendPush({ materialId: a.id, at: "2026-09-20T00:00:00.000Z" });
+
+    const picked = await pickForPush();
+    assert.equal(picked?.material.id, b.id);
+    void c; // 仅用于确认三篇顺序，c 暂未被断言选中
+  });
+
+  test("轮转：再推过第二篇，给出第三篇", async () => {
+    const a = await writeMaterial({ title: "A", markdown: "x", source: "https://a" });
+    await new Promise((r) => setTimeout(r, 5));
+    const b = await writeMaterial({ title: "B", markdown: "x", source: "https://b" });
+    await new Promise((r) => setTimeout(r, 5));
+    const c = await writeMaterial({ title: "C", markdown: "x", source: "https://c" });
+
+    await appendPush({ materialId: a.id, at: "2026-09-20T00:00:00.000Z" });
+    await appendPush({ materialId: b.id, at: "2026-09-21T00:00:00.000Z" });
+
+    const picked = await pickForPush();
+    assert.equal(picked?.material.id, c.id);
+  });
+
+  test("循环：三篇都推过之后，pickForPush 回到上次推送时间最早的那篇", async () => {
+    const a = await writeMaterial({ title: "A", markdown: "x", source: "https://a" });
+    await new Promise((r) => setTimeout(r, 5));
+    const b = await writeMaterial({ title: "B", markdown: "x", source: "https://b" });
+    await new Promise((r) => setTimeout(r, 5));
+    const c = await writeMaterial({ title: "C", markdown: "x", source: "https://c" });
+
+    // 推送顺序 A -> C -> B，最早被推的是 A，所以下一次该轮回 A
+    await appendPush({ materialId: a.id, at: "2026-09-20T00:00:00.000Z" });
+    await appendPush({ materialId: c.id, at: "2026-09-21T00:00:00.000Z" });
+    await appendPush({ materialId: b.id, at: "2026-09-22T00:00:00.000Z" });
+
+    const picked = await pickForPush();
+    assert.equal(picked?.material.id, a.id);
+  });
+
+  test("层级不被覆盖：刚推过的孤岛仍排在从没推过的留档之前", async () => {
+    const island = await writeMaterial({ title: "刚推过的孤岛", markdown: "x", source: "https://a" });
+    const archived = await writeMaterial({ title: "从没推过的留档", markdown: "x", source: "https://b" });
+    await appendArchived({ materialId: archived.id, at: "2026-09-10T00:00:00.000Z" });
+
+    // 孤岛材料「今天」刚被推过，留档材料从没被推过——如果把「上次推送时间」
+    // 当全局主键，从没推过的留档会排到刚推过的孤岛前面，那就推翻了
+    // ADR-0004 定的「孤岛优先于留档」。
+    await appendPush({ materialId: island.id, at: "2026-09-23T00:00:00.000Z" });
+
+    const picked = await pickForPush(new Date("2026-09-23T12:00:00.000Z"));
+    assert.equal(picked?.kind, "孤岛");
+    assert.equal(picked?.material.id, island.id);
+  });
+
+  test("平手按原顺序：两篇都没推过时，仍按 since 升序", async () => {
+    const first = await writeMaterial({ title: "先收录", markdown: "x", source: "https://a" });
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await writeMaterial({ title: "后收录", markdown: "x", source: "https://b" });
+
+    const picked = await pickForPush();
+    assert.equal(picked?.material.id, first.id);
   });
 });

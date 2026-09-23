@@ -12,7 +12,8 @@
     "eval": "tsx src/scripts/eval.ts",
     "keywords": "tsx src/scripts/backfill-keywords.ts",
     "expand": "tsx src/scripts/expand-index-page.ts",
-    "push": "tsx src/scripts/push.ts"
+    "push": "tsx src/scripts/push.ts",
+    "drills": "tsx src/scripts/warm-drills.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

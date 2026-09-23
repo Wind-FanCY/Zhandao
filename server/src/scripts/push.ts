@@ -20,6 +20,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pickForPush } from "../push/pool.js";
+import { appendPush } from "../push/log.js";
 import { initializeRuntime } from "../runtime.js";
 import { alreadyShownToday, markShownToday } from "../push/shown.js";
 
@@ -60,7 +61,10 @@ async function main(): Promise<void> {
   // 打一行「今天已提示过」本身就是它要消掉的那种噪音。
   if (oncePerDay && (await alreadyShownToday())) return;
 
-  const candidate = await pickForPush();
+  // 与 pickForPush 共用同一个 now，让「挑出这一条」与「记这一条是什么时候推的」
+  // 指向同一时刻，不留时间差。
+  const now = new Date();
+  const candidate = await pickForPush(now);
 
   if (!candidate) {
     // 「今天没有」是合法输出，但 hook 场景下也不该出声
@@ -71,6 +75,21 @@ async function main(): Promise<void> {
   }
 
   const { material, kind, since } = candidate;
+
+  // 只在「本人这次真的看到了推送」时才写推送日志，供下次 pickForPush 轮转用。
+  // 判断标准是 --once-per-day 的去重闸这次放行了（能走到这里就说明放行了）——
+  // 不是「候选存在」，也不看 hookMode / dryRun：
+  //   - 不带 --once-per-day 的手动 `npm run push` 是**查询**，连敲五次不该把
+  //     五篇材料轮转掉，所以不写；
+  //   - 去重闸拦下的那次（当天第二次开会话）在上面 `alreadyShownToday` 就已经
+  //     return 了，根本走不到这里，不需要额外判断；
+  //   - --dry-run 不影响：它只管发不发系统通知，hook 场景本来就带着 --dry-run，
+  //     而正文已经进对话、本人确实看到了那行字。
+  async function recordPushIfShown(): Promise<void> {
+    if (oncePerDay) {
+      await appendPush({ materialId: material.id, at: now.toISOString() });
+    }
+  }
 
   if (hookMode) {
     console.log(
@@ -86,6 +105,7 @@ async function main(): Promise<void> {
         },
       }),
     );
+    await recordPushIfShown();
     if (oncePerDay) await markShownToday();
     return;
   }
@@ -96,12 +116,14 @@ async function main(): Promise<void> {
 
   if (dryRun) {
     console.log("\n[dry-run] 不发通知。");
+    await recordPushIfShown();
     if (oncePerDay) await markShownToday();
     return;
   }
 
   await sendNotification("Zhandao", `${kind}：${material.title}`);
   console.log("\n已发送系统通知。");
+  await recordPushIfShown();
   if (oncePerDay) await markShownToday();
 }
 
