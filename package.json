@@ -16,7 +16,8 @@
     "keywords": "npm --workspace server run keywords --",
     "expand": "npm --workspace server run expand --",
     "push": "npm --workspace server run push --",
-    "drills": "npm --workspace server run drills --"
+    "drills": "npm --workspace server run drills --",
+    "ask-compare": "npm --workspace server run ask-compare --"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"
