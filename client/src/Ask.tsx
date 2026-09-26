@@ -21,11 +21,23 @@ interface AskStep {
   kind: string;
   detail: string;
   summary: string;
+  source?: AskSource;
 }
 
 interface AskCite {
   materialId: string;
   title: string;
+}
+
+/**
+ * 只在**成功的 read 步骤**上出现，带着那一段**未截断**的原文——`summary`
+ * 仍然只是 200 字预览，不能拿它当出处。存在的理由见下面「出处原文」那块注释。
+ */
+interface AskSource {
+  materialId: string;
+  title: string;
+  line: number;
+  text: string;
 }
 
 /**
@@ -56,7 +68,9 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 // SSE 载荷是外部数据（来自模型驱动的循环，形状最不可信的一类），
 // 一律手写 typeof 收窄，不用 `as` 断言——CLAUDE.md「外部数据必须校验」。
-function isAskStep(v: unknown): v is AskStep {
+// `source` 字段单独校验、不在这里检查——见下面 extractAskSource 的注释：
+// 那个字段形状不对时该丢的是它自己，不是整条 step。
+function isAskStep(v: unknown): v is Omit<AskStep, "source"> {
   if (!isRecord(v)) return false;
   if (typeof v.round !== "number") return false;
   if (typeof v.kind !== "string") return false;
@@ -68,6 +82,36 @@ function isAskStep(v: unknown): v is AskStep {
 function isAskCite(v: unknown): v is AskCite {
   if (!isRecord(v)) return false;
   return typeof v.materialId === "string" && typeof v.title === "string";
+}
+
+function isAskSource(v: unknown): v is AskSource {
+  if (!isRecord(v)) return false;
+  if (typeof v.materialId !== "string") return false;
+  if (typeof v.title !== "string") return false;
+  if (typeof v.line !== "number") return false;
+  if (typeof v.text !== "string") return false;
+  return true;
+}
+
+/**
+ * 独立于 isAskStep 再收窄一次：`v` 是那条 step 的原始 unknown 数据（不是
+ * isAskStep 窄化后的类型，那个类型里已经不含 source 键，取不到）。
+ * 形状不对就返回 undefined、把这条 step 当成「没带 source」处理，
+ * **不让一个字段的坏形状拖累整条 step 被丢弃**——protocol_error 那种
+ * 步骤本来就没有 source，这条路径要和它长得一样宽容。
+ */
+function extractAskSource(v: unknown): AskSource | undefined {
+  if (!isRecord(v)) return undefined;
+  return isAskSource(v.source) ? v.source : undefined;
+}
+
+/**
+ * 折叠态标题用：材料标题 + 原文第一行截断到约 40 字。
+ * 只是给人一个「认出来」的锚点，不是摘要——真要看内容得展开。
+ */
+function summarizeSourceLine(text: string): string {
+  const firstLine = (text.split("\n")[0] ?? "").trim();
+  return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine;
 }
 
 function isAskDonePayload(v: unknown): v is AskDonePayload {
@@ -214,6 +258,8 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
   // null = 还没收到 done 事件（本轮还在跑，或者还没问过）
   const [found, setFound] = useState<boolean | null>(null);
   const [outcome, setOutcome] = useState<AskOutcome | null>(null);
+  // 每次成功 read 带出的原文切片，按到达顺序累积——见「出处原文」那块渲染注释。
+  const [sources, setSources] = useState<AskSource[]>([]);
 
   const ask = useCallback(async (rawQuestion: string) => {
     const q = rawQuestion.trim();
@@ -228,6 +274,7 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
     setHitLimit(false);
     setFound(null);
     setOutcome(null);
+    setSources([]);
 
     try {
       const res = await fetch(`${API}/api/ask`, {
@@ -259,7 +306,19 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
           return;
         }
         if (parsed.event === "step") {
-          if (isAskStep(data)) setSteps((prev) => [...prev, data]);
+          if (isAskStep(data)) {
+            const source = extractAskSource(data);
+            setSteps((prev) => [...prev, { ...data, source }]);
+            if (source !== undefined) {
+              // 模型可能重复读同一段——按 materialId + line 去重，
+              // 否则「几段出处」这个一眼可见的数字会被灌水。
+              setSources((prev) =>
+                prev.some((p) => p.materialId === source.materialId && p.line === source.line)
+                  ? prev
+                  : [...prev, source],
+              );
+            }
+          }
         } else if (parsed.event === "done") {
           if (isAskDonePayload(data)) {
             setAnswer(data.answer);
@@ -445,6 +504,42 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* 出处原文：答案是模型对材料的**转述**（system prompt 只要求「答案来自
+              已 read 的原文」，没要求照抄），现有保证只有「引用是真的」——cites 里
+              每篇都真被 read 过，但**不保证转述没跑偏**。一段跑偏的转述配一个货真
+              价实的引用，比没有引用更唬人。对策不是在 prompt 里加一句「请照抄」
+              （那又是个没法机械校验的承诺），而是把每次 read 到的未截断原文摆在
+              答案旁边，让偏差从「读者发现不了」变成「读者一眼能对照」——本人原话：
+              「我发现原生会总结，不是原材料的那一节，而是编辑过的话」。
+              标题行始终可见（哪怕答案是 aborted / not_found）：那种情况下模型
+              读了东西但没用上，本人更需要看到它到底读了什么；只有段落内容本身
+              折叠，因为「读原文」属于「想深入看看」，不是做决定必需的控件。 */}
+          {sources.length > 0 && (
+            <div style={{ marginTop: "16px" }}>
+              <div style={{ fontSize: "12px", color: "#667", marginBottom: "6px" }}>
+                出处原文（{sources.length} 段）
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {sources.map((s) => (
+                  <details
+                    key={`${s.materialId}:${s.line}`}
+                    style={{
+                      border: "1px solid #ddd",
+                      borderRadius: "4px",
+                      backgroundColor: "#fafafa",
+                      padding: "8px 10px",
+                    }}
+                  >
+                    <summary style={{ cursor: "pointer", fontSize: "13px", color: "#555" }}>
+                      {s.title} · {summarizeSourceLine(s.text)}
+                    </summary>
+                    <div style={{ marginTop: "8px" }}>{renderBody(s.text)}</div>
+                  </details>
+                ))}
+              </div>
             </div>
           )}
         </div>

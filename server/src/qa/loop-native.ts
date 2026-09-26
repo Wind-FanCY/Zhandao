@@ -50,7 +50,7 @@ import { toolSearch, toolOutline, toolRead, type ToolContext } from "./tools.js"
 import { ProtocolError, type Action } from "./protocol.js";
 import { TOOL_SCHEMAS, NATIVE_SYSTEM_PROMPT, nativeCallToAction, renderToolResult } from "./protocol-native.js";
 import type { NativeTurn } from "../model/answer-native.js";
-import type { AskResult, Step } from "./loop.js";
+import { readSourceOf, type AskResult, type Step, type ReadSource } from "./loop.js";
 
 export interface AskNativeDeps {
   ctx: ToolContext;
@@ -197,6 +197,10 @@ export async function runAskNative(
       }
 
       let result: unknown;
+      // 成功的 read 要把**未截断的原文**一并带进步骤，界面据此渲染「出处原文」。
+      // 理由见 qa/loop.ts 的 ReadSource：答案是转述，而我们只保证了「引用是真的」，
+      // 没保证「内容忠于出处」——把原文摆出来，让偏差变成可见的。
+      let source: ReadSource | undefined;
       switch (action.kind) {
         case "search":
           result = toolSearch(deps.ctx, action.query);
@@ -209,6 +213,7 @@ export async function runAskNative(
           // 只有真的读到内容（非 null）才记入"读过"的凭证——与 qa/loop.ts 同一条规则。
           if (result !== null) {
             readMaterialIds.add(action.materialId);
+            source = readSourceOf(action.materialId, action.line, result);
           }
           break;
         case "answer":
@@ -222,7 +227,12 @@ export async function runAskNative(
       const rendered = renderToolResult(action, result);
       messages.push({ role: "tool", tool_call_id: call.id, content: rendered || "(空结果)" });
 
-      const step: Step = { round, action, resultSummary: previewOf(rendered) };
+      const step: Step = {
+        round,
+        action,
+        resultSummary: previewOf(rendered),
+        ...(source ? { source } : {}),
+      };
       steps.push(step);
       deps.onStep?.(step);
     }

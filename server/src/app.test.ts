@@ -1399,7 +1399,7 @@ describe("POST /api/ask（原生 tool_calls）", () => {
     await withServer(
       [
         { content: null, toolCalls: [call("search", { query: "流式响应 缓冲" })] },
-        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 7 })] },
+        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 1 })] },
         { content: "要关掉缓冲。", toolCalls: [] },
       ],
       async (port) => {
@@ -1453,6 +1453,45 @@ describe("POST /api/ask（原生 tool_calls）", () => {
     });
   });
 
+  test("成功的 read 步骤必须带上**未截断**的出处原文", async () => {
+    // 答案是模型的转述（prompt 说的是「来自」不是「照抄」），而我们只保证了「引用是真的」，
+    // 没保证「内容忠于出处」。把原文发到前端，是为了让偏差变成可见的——
+    // 所以这里必须断言它**没被截断**，`summary` 那个 200 字预览不能拿来顶替。
+    await withServer(
+      [
+        // 正文（去掉 frontmatter 之后）第 1 行是 `## 缓冲问题`，切片会一直取到 `## 别的`
+        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 1 })] },
+        { content: "转述过的答案。", toolCalls: [] },
+      ],
+      async (port) => {
+        const frames = await readStream(await post(port, { question: "缓冲" }));
+        const readStep = frames
+          .filter((f) => f.event === "step")
+          .map((f) => asRecord(f.data))
+          .find((d) => d.kind === "read");
+        assert.ok(readStep, "必须有 read 步骤");
+
+        const src = readStep.source;
+        assert.ok(typeof src === "object" && src !== null, "read 步骤必须带 source");
+        const s = asRecord(src);
+        assert.strictEqual(s.materialId, MAT_A);
+        assert.strictEqual(s.title, "压缩中间件");
+        assert.strictEqual(s.line, 1);
+        assert.ok(typeof s.text === "string" && s.text.includes("流式响应要关掉缓冲"), "必须是原文");
+        assert.ok(!String(s.text).includes("…"), "原文不得被截断");
+
+        // 非 read 的步骤不该带 source——只发读到的那一段，不把材料正文整篇漏给前端
+        const others = frames
+          .filter((f) => f.event === "step")
+          .map((f) => asRecord(f.data))
+          .filter((d) => d.kind !== "read");
+        for (const o of others) {
+          assert.strictEqual(o.source, undefined, `${o.kind} 步骤不该带 source`);
+        }
+      },
+    );
+  });
+
   test("一轮多个 tool_call 全部被执行——这是原生协议与手搓最大的行为差异", async () => {
     await withServer(
       [
@@ -1463,7 +1502,7 @@ describe("POST /api/ask（原生 tool_calls）", () => {
             call("search", { query: "流式响应" }, "c2"),
           ],
         },
-        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 7 })] },
+        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 1 })] },
         { content: "答案。", toolCalls: [] },
       ],
       async (port) => {

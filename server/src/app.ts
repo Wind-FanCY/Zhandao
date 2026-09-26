@@ -1205,6 +1205,9 @@ export function createApp(
             kind: a.kind,
             detail,
             summary: step.resultSummary,
+            // 成功的 read 才有：未截断的原文，界面拿它渲染「出处原文」。
+            // 这是整条链路里唯一会把材料正文发给前端的地方，刻意只发读到的那一段。
+            ...(step.source ? { source: step.source } : {}),
           });
         },
       });

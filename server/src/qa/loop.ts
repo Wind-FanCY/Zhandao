@@ -22,10 +22,36 @@ import type { ChatMessage } from "../model/answer.js";
  */
 export type StepEvent = Action | { kind: "protocol_error"; message: string };
 
+/**
+ * 一次成功的 `read` 读到的**原文全文**（不截断）。
+ *
+ * **为什么步骤里要多带这一份**：答案是模型对原文的**转述**——两条 prompt 的硬性规则写的是
+ * 「答案只能**来自**你已经 read 到的原文」，「来自」不是「照抄」，所以它必然会重新组织。
+ * 而现有的保证只有「**引用是真的**」（cites 里每篇都真的被 read 过），
+ * **完全没有保证「内容忠于出处」**——一段跑偏的转述配上一个货真价实的引用，
+ * 看起来比没有引用更可信，而这个库是拿来准备面试的，细节偏一点正是最伤的那种错。
+ *
+ * 对策不是在 prompt 里再加一句「请照抄」（那又是一个没有机械校验的承诺），
+ * 而是**把原文摆到答案旁边，让偏差变成可见的**——与「提炼出的查询必须可见、可编辑」
+ * 同一个手法（CLAUDE.md 归属那节：把静默失效变成可见失效）。
+ *
+ * `resultSummary` 是给步骤行用的 200 字预览，**不要拿它当原文**：它被截断过。
+ */
+export interface ReadSource {
+  materialId: string;
+  title: string;
+  /** 0-based 起始行号，与 outline 给出的行号一致 */
+  line: number;
+  /** 切片原文，未截断 */
+  text: string;
+}
+
 export interface Step {
   round: number;
   action: StepEvent;
   resultSummary: string;
+  /** 只有成功的 `read` 步骤有；界面据此渲染「出处原文」 */
+  source?: ReadSource;
 }
 
 /**
@@ -190,6 +216,7 @@ export async function runAsk(
 
     // 剩下三种是工具动作：search / outline / read——真正执行，把结果拼回对话历史
     let result: unknown;
+    let source: ReadSource | undefined;
     if (action.kind === "search") {
       result = toolSearch(deps.ctx, action.query);
     } else if (action.kind === "outline") {
@@ -200,6 +227,7 @@ export async function runAsk(
       // 不能算数，否则模型可以拿一个读不到的 materialId 骗过引用完整性校验
       if (result !== null) {
         readMaterialIds.add(action.materialId);
+        source = readSourceOf(action.materialId, action.line, result);
       }
     }
 
@@ -207,7 +235,7 @@ export async function runAsk(
     messages.push({ role: "assistant", content: raw });
     messages.push({ role: "user", content: rendered });
 
-    const step: Step = { round, action, resultSummary: previewOf(rendered) };
+    const step: Step = { round, action, resultSummary: previewOf(rendered), ...(source ? { source } : {}) };
     steps.push(step);
     deps.onStep?.(step);
   }
@@ -218,4 +246,18 @@ export async function runAsk(
   // 触顶算 **not_found**：模型确实搜了满 maxRounds 轮仍无所获，这是关于库的弱证据。
   // 与 aborted 的分界是「它到底有没有去找过」。
   return { question, steps, answer: null, cites: [], rounds: maxRounds, hitLimit: true, outcome: "not_found" };
+}
+
+/**
+ * 把 `toolRead` 的返回值收窄成 `ReadSource`。
+ *
+ * `result` 是 `unknown`（工具分派那段刻意不给联合类型，免得每加一个工具就改一处），
+ * 所以这里手写 `typeof` 收窄而不是 `as`——外部形状不可信这条对自己的代码同样适用，
+ * 何况 `toolRead` 的返回类型将来可能变。
+ */
+export function readSourceOf(materialId: string, line: number, result: unknown): ReadSource | undefined {
+  if (typeof result !== "object" || result === null) return undefined;
+  if (!("title" in result) || typeof result.title !== "string") return undefined;
+  if (!("text" in result) || typeof result.text !== "string") return undefined;
+  return { materialId, title: result.title, line, text: result.text };
 }
