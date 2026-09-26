@@ -22,8 +22,8 @@ import { listDrills } from "./drills/list.js";
 import { DrillExtractFailed } from "./model/extract-drills.js";
 import { appendDrillRecord, readDrillVerdicts } from "./drills/records.js";
 import { readCachedDrills } from "./drills/cache.js";
-import { runAsk } from "./qa/loop.js";
-import { askOnce, AnswerCallFailed, type ChatMessage } from "./model/answer.js";
+import { runAskNative } from "./qa/loop-native.js";
+import { askOnceNative, NativeCallFailed, type NativeTurn } from "./model/answer-native.js";
 import { appendAsk } from "./qa/asks.js";
 import { ProtocolError } from "./qa/protocol.js";
 
@@ -144,8 +144,8 @@ export function createApp(
   ) => Promise<{ line: number; question: string }[]>,
   // 第四个位置参数了，这个签名开始有味道——四个可选位置参数，调用方漏一个位置就静默错位。
   // 没有现在改成 options 对象，是因为那要同时动 index.ts 与全部测试，属于独立改动；
-  // 再加第五个之前必须先改。
-  askOnceFn?: (messages: ChatMessage[]) => Promise<string>,
+  // 再加第五个之前必须先改。**2026-09-26 切原生时刻意「替换」而不是「新增」，就是为了守住这句话。**
+  askOnceNativeFn?: (messages: unknown[], toolSchemas: unknown[]) => Promise<NativeTurn>,
 ): Express {
 
   // 作业状态必须在 createApp 之内：原先是模块级的，于是所有 app 实例共享同一份，
@@ -1178,9 +1178,13 @@ export function createApp(
 
     try {
       const index = await buildMaterialsIndex();
-      const result = await runAsk(question, {
+      // **走原生 `tool_calls` 那条路**（2026-09-26 起，试用期）。
+      // 依据是对照实验：库外难题上手搓协议格式错误率 44%、原生 0/9，且原生少约 15% 模型调用。
+      // **手搓那条没有删，`npm run ask-compare` 仍然同时跑两条**——改回去就是把这里
+      // 换回 `runAsk` + `askOnce`。数字与完整权衡见 `docs/findings.md`。
+      const result = await runAskNative(question, {
         ctx: { index },
-        askOnce: askOnceFn ?? askOnce,
+        askOnceNative: askOnceNativeFn ?? askOnceNative,
         onStep: (step) => {
           const a = step.action;
           // 判别联合按 kind 收窄取「细节」，不用 `as`
@@ -1251,7 +1255,7 @@ export function createApp(
       });
     } catch (err) {
       const message =
-        err instanceof AnswerCallFailed || err instanceof MissingApiKey || err instanceof ProtocolError
+        err instanceof NativeCallFailed || err instanceof MissingApiKey || err instanceof ProtocolError
           ? err.message
           : err instanceof Error
             ? err.message

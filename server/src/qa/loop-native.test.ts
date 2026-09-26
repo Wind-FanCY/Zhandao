@@ -260,3 +260,57 @@ describe("qa/loop-native runAskNative", () => {
     assert.deepStrictEqual(seen, ["answer"]);
   });
 });
+
+describe("runAskNative：「找过了」与「没去找」不是一回事", () => {
+  let dir: string;
+  let c: ToolContext;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(resolve(tmpdir(), "zhandao-native-outcome-"));
+    process.env.ZHANDAO_DATA_DIR = dir;
+    await writeMaterial("n1", "某篇材料", ["# 某篇材料", "", "## 小节", "", "正文。"].join("\n"));
+    c = { index: await buildMaterialsIndex() };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    delete process.env.ZHANDAO_DATA_DIR;
+  });
+
+  test("一个工具都没调就给文本 → aborted（拿通用知识蒙的，不该记成收录信号）", async () => {
+    const result = await runAskNative(
+      "随便问",
+      {
+        ctx: c,
+        askOnceNative: async () => ({ content: "我觉得答案是这样的……", toolCalls: [] }),
+      },
+      { maxRounds: 4 },
+    );
+    assert.strictEqual(result.answer, null);
+    assert.strictEqual(result.outcome, "aborted");
+  });
+
+  test("搜过但没读到可引用原文，然后给文本 → not_found（它确实去找了，这是收录信号）", async () => {
+    let turn = 0;
+    const result = await runAskNative(
+      "库里没有的东西",
+      {
+        ctx: c,
+        askOnceNative: async () => {
+          turn += 1;
+          if (turn === 1) {
+            return {
+              content: null,
+              toolCalls: [{ id: "c1", name: "search", argsRaw: JSON.stringify({ query: "找不到的词" }) }],
+            };
+          }
+          return { content: "库里没有相关材料。", toolCalls: [] };
+        },
+      },
+      { maxRounds: 4 },
+    );
+    assert.strictEqual(result.answer, null);
+    // 这一条是整个修复的判据：修之前它和上一条一样都是 aborted，于是收录信号在原生路径上消失
+    assert.strictEqual(result.outcome, "not_found", "搜过了就算「找过」，read 不是唯一的找法");
+  });
+});

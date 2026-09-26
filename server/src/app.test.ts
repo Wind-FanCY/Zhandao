@@ -1281,13 +1281,22 @@ describe("Drills routes (预练)", () => {
  * 这里全部用注入的假模型，**绝不调真实 DeepSeek**（测试打网络是这个项目明令禁止的）。
  * 假模型按调用次数依次吐出预设的协议 JSON，于是整条循环的路径可以被精确摆布。
  */
-describe("POST /api/ask", () => {
+/**
+ * POST /api/ask —— **提问**端点。**2026-09-26 起走原生 `tool_calls` 那条路。**
+ *
+ * 全部用注入的假模型，**绝不调真实 DeepSeek**。假模型按调用次数依次吐出预设的
+ * `NativeTurn`，于是整条循环的路径可以被精确摆布。
+ *
+ * **测试前提与手搓协议时期不同，不是照搬**：原生协议下「编造引用」物理上不存在
+ * （答案没有 cites 字段可供声明），「连续协议错误熔断」也不存在（坏参数按单个
+ * tool_call 退回给模型）。所以这里测的是原生路径真正会发生的那些终态。
+ */
+describe("POST /api/ask（原生 tool_calls）", () => {
   let dataDir: string;
   let bookmarksFile: string;
   let tempDir: string;
 
   const MAT_A = "01M2JD1TKE6C6Q1WQ3JY2ABAX0";
-  const MAT_B = "01M2JD1N0VFX9J3VS5D00GM26K";
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "zhandao-ask-"));
@@ -1302,10 +1311,6 @@ describe("POST /api/ask", () => {
       join(dataDir, "materials", "a.md"),
       `---\nid: ${MAT_A}\ntitle: 压缩中间件\nsource: https://example.com/a\ncaptured: 2026-09-01T00:00:00.000Z\n---\n\n## 缓冲问题\n\n流式响应要关掉缓冲，否则 SSE 会攒到最后一起到。\n\n## 别的\n\n无关内容。\n`,
     );
-    await writeFile(
-      join(dataDir, "materials", "b.md"),
-      `---\nid: ${MAT_B}\ntitle: 手撕代码篇\nsource: https://example.com/b\ncaptured: 2026-09-02T00:00:00.000Z\n---\n\n## 防抖\n\n防抖是延迟执行。\n`,
-    );
   });
 
   afterEach(async () => {
@@ -1314,19 +1319,25 @@ describe("POST /api/ask", () => {
     delete process.env.ZHANDAO_DATA_DIR;
   });
 
-  /** 把预设应答排成队列；超出队列长度就一直返回最后一条（防止循环跑飞时测试卡死） */
-  function scriptedModel(replies: string[]): () => Promise<string> {
+  interface Turn { content: string | null; toolCalls: { id: string; name: string; argsRaw: string }[] }
+
+  /** 工具调用的简写：call("search", {query}) */
+  function call(name: string, args: Record<string, unknown>, id = `c_${name}`): Turn["toolCalls"][number] {
+    return { id, name, argsRaw: JSON.stringify(args) };
+  }
+
+  /** 排成队列；超出长度就一直返回最后一条（防止循环跑飞时测试卡死） */
+  function scripted(turns: Turn[]): () => Promise<Turn> {
     let i = 0;
     return async () => {
-      const r = replies[Math.min(i, replies.length - 1)];
+      const t = turns[Math.min(i, turns.length - 1)];
       i += 1;
-      return r ?? "";
+      return t ?? { content: "", toolCalls: [] };
     };
   }
 
   interface Frame { event: string; data: unknown }
 
-  /** 读完整条 SSE 流，解析成帧数组。测试里流是有限的，读到底即可。 */
   async function readStream(res: Response_): Promise<Frame[]> {
     const text = await res.text();
     const frames: Frame[] = [];
@@ -1343,11 +1354,8 @@ describe("POST /api/ask", () => {
     return frames;
   }
 
-  async function withServer<T>(
-    replies: string[],
-    fn: (port: number) => Promise<T>,
-  ): Promise<T> {
-    const app = createApp(bookmarksFile, undefined, undefined, scriptedModel(replies));
+  async function withServer<T>(turns: Turn[], fn: (port: number) => Promise<T>): Promise<T> {
+    const app = createApp(bookmarksFile, undefined, undefined, scripted(turns));
     const srv = await new Promise<any>((resolve) => {
       const s = app.listen(0, () => resolve(s));
     });
@@ -1358,123 +1366,121 @@ describe("POST /api/ask", () => {
     }
   }
 
-  function post(port: number, body: unknown, headers: Record<string, string> = { "Content-Type": "application/json" }) {
+  function post(port: number, body: unknown) {
     return fetch(`http://localhost:${port}/api/ask`, {
       method: "POST",
-      headers,
-      body: typeof body === "string" ? body : JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
   }
 
+  async function doneOf(res: Response_): Promise<Record<string, unknown>> {
+    const frames = await readStream(res);
+    const done = frames.find((f) => f.event === "done");
+    assert.ok(done, "必须有 done 事件");
+    return asRecord(done.data);
+  }
+
   test("空问题 / 缺 Content-Type 都返回 400，且错误文案来自我们的守卫", async () => {
-    await withServer(["{}"], async (port) => {
+    await withServer([{ content: "", toolCalls: [] }], async (port) => {
       const r1 = await post(port, { question: "   " });
       assert.strictEqual(r1.status, 400);
-      const d1: unknown = await r1.json();
       // 断言错误**文案**而不只是状态码：第一版曾因为 express.json() 的 strict 模式
       // 返回 400 而"通过"，那个 400 根本不是我们的守卫发的。
-      assert.match(JSON.stringify(d1), /Missing or empty question/);
+      assert.match(JSON.stringify(await r1.json()), /Missing or empty question/);
 
-      // 没有 Content-Type 时 express.json() 不解析，req.body 是 undefined
       const r2 = await fetch(`http://localhost:${port}/api/ask`, { method: "POST", body: "whatever" });
       assert.strictEqual(r2.status, 400);
       assert.match(JSON.stringify(await r2.json()), /Missing or empty question/);
     });
   });
 
-  test("完整路径 search → outline → read → answer，引用带标题，提问记录落盘 found=true", async () => {
-    const replies = [
-      JSON.stringify({ kind: "search", query: "流式响应 缓冲" }),
-      JSON.stringify({ kind: "outline", materialId: MAT_A }),
-      JSON.stringify({ kind: "read", materialId: MAT_A, line: 7 }),
-      JSON.stringify({ kind: "answer", text: "要关掉缓冲。", cites: [MAT_A] }),
-    ];
-    await withServer(replies, async (port) => {
-      const res = await post(port, { question: "为什么 SSE 会攒到最后一起到？" });
-      assert.strictEqual(res.status, 200);
-      const frames = await readStream(res);
+  test("完整路径 search → read → 文本答案，引用来自真实 read，提问记录 found=true", async () => {
+    await withServer(
+      [
+        { content: null, toolCalls: [call("search", { query: "流式响应 缓冲" })] },
+        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 7 })] },
+        { content: "要关掉缓冲。", toolCalls: [] },
+      ],
+      async (port) => {
+        const res = await post(port, { question: "为什么 SSE 会攒到最后一起到？" });
+        assert.strictEqual(res.status, 200);
+        const rec = await doneOf(res);
 
-      const steps = frames.filter((f) => f.event === "step");
-      assert.ok(steps.length >= 3, `应当看到至少 3 个步骤事件，实际 ${steps.length}`);
+        assert.strictEqual(rec.outcome, "answered");
+        assert.strictEqual(rec.found, true);
+        assert.strictEqual(rec.answer, "要关掉缓冲。");
+        assert.deepStrictEqual(rec.cites, [{ materialId: MAT_A, title: "压缩中间件" }]);
 
-      const done = frames.find((f) => f.event === "done");
-      assert.ok(done, "必须有 done 事件");
-      const rec = asRecord(done.data);
-      assert.strictEqual(rec.found, true);
-      assert.strictEqual(rec.answer, "要关掉缓冲。");
-      assert.deepStrictEqual(rec.cites, [{ materialId: MAT_A, title: "压缩中间件" }]);
+        const { readAsks } = await import("./qa/asks.js");
+        const asks = await readAsks();
+        assert.strictEqual(asks.length, 1);
+        assert.strictEqual(asks[0]?.found, true);
+        assert.deepStrictEqual(asks[0]?.queries, ["流式响应 缓冲"]);
+        // **答案正文不得落盘**——CLAUDE.md 的硬约束，不是风格偏好
+        assert.ok(!JSON.stringify(asks[0]).includes("要关掉缓冲"), "提问记录里不该出现答案正文");
+      },
+    );
+  });
+
+  test("找过了但没读到可引用原文 → not_found，且必须落盘（这是收录信号）", async () => {
+    await withServer(
+      [
+        { content: null, toolCalls: [call("search", { query: "Rust 所有权" })] },
+        { content: "库里没有相关材料。", toolCalls: [] },
+      ],
+      async (port) => {
+        const rec = await doneOf(await post(port, { question: "Rust 的所有权怎么工作？" }));
+        assert.strictEqual(rec.outcome, "not_found", "搜过了就算找过——read 不是唯一的找法");
+        assert.strictEqual(rec.found, false);
+
+        const { readAsks } = await import("./qa/asks.js");
+        const asks = await readAsks();
+        assert.strictEqual(asks.length, 1, "收录信号必须留下来，这是 found:false 那些行存在的全部理由");
+        assert.strictEqual(asks[0]?.found, false);
+      },
+    );
+  });
+
+  test("一个工具都没调就给文本 → aborted，且**不得**写进提问记录", async () => {
+    await withServer([{ content: "我觉得是这样的……", toolCalls: [] }], async (port) => {
+      const rec = await doneOf(await post(port, { question: "随便问问" }));
+      assert.strictEqual(rec.outcome, "aborted", "没去找过，不能当成关于库的证据");
+      assert.strictEqual(rec.answer, null, "没有出处的答案不许漏出去");
 
       const { readAsks } = await import("./qa/asks.js");
-      const asks = await readAsks();
-      assert.strictEqual(asks.length, 1);
-      assert.strictEqual(asks[0]?.found, true);
-      assert.deepStrictEqual(asks[0]?.queries, ["流式响应 缓冲"]);
-      // **答案正文不得落盘**——这是 CLAUDE.md 的硬约束，不是风格偏好
-      assert.ok(!JSON.stringify(asks[0]).includes("要关掉缓冲"), "提问记录里不该出现答案正文");
+      assert.deepStrictEqual(await readAsks(), [], "aborted 是假证据，一行都不该落盘");
     });
   });
 
-  test("连续协议错误 → aborted，绝不能写成「库里没有」污染收录信号", async () => {
-    // 模型一直吐垃圾。修之前这会走到 answer:null → found:false → 写进 asks.jsonl，
-    // 于是一条「模型嘴瓢」被永久记成「库里缺这个」，而 asks.jsonl 不可再生。
-    await withServer(["这不是 json", "还不是 json", "依然不是"], async (port) => {
-      const res = await post(port, { question: "库里其实有答案的某个问题" });
-      const frames = await readStream(res);
-      const done = frames.find((f) => f.event === "done");
-      assert.ok(done);
-      const rec = asRecord(done.data);
-      assert.strictEqual(rec.outcome, "aborted", "协议错误放弃必须是 aborted");
-      assert.strictEqual(rec.found, false);
+  test("一轮多个 tool_call 全部被执行——这是原生协议与手搓最大的行为差异", async () => {
+    await withServer(
+      [
+        {
+          content: null,
+          toolCalls: [
+            call("search", { query: "缓冲" }, "c1"),
+            call("search", { query: "流式响应" }, "c2"),
+          ],
+        },
+        { content: null, toolCalls: [call("read", { materialId: MAT_A, line: 7 })] },
+        { content: "答案。", toolCalls: [] },
+      ],
+      async (port) => {
+        const res = await post(port, { question: "两个词一起搜" });
+        const frames = await readStream(res);
+        const searchSteps = frames
+          .filter((f) => f.event === "step")
+          .map((f) => asRecord(f.data))
+          .filter((d) => d.kind === "search");
+        assert.strictEqual(searchSteps.length, 2, "并行发出的两个 search 都必须被执行并各自产生一个步骤");
+        assert.strictEqual(searchSteps[0]?.round, 1);
+        assert.strictEqual(searchSteps[1]?.round, 1, "并行调用属于同一轮");
 
-      const { readAsks } = await import("./qa/asks.js");
-      const asks = await readAsks();
-      assert.deepStrictEqual(asks, [], "这是假证据，一行都不该落盘");
-
-      // 步骤流里也必须标成 protocol_error 而不是 none
-      const kinds = frames.filter((f) => f.event === "step").map((f) => asRecord(f.data).kind);
-      assert.ok(kinds.includes("protocol_error"), `步骤流应含 protocol_error，实际 ${kinds.join(",")}`);
-      assert.ok(!kinds.includes("none"), "协议错误不得显示成「库里没有」");
-    });
-  });
-
-  test("库里没有：found=false 且照样落盘——这类记录是收录信号，最不该被丢", async () => {
-    await withServer([JSON.stringify({ kind: "none", reason: "库里没有 Rust 的内容" })], async (port) => {
-      const res = await post(port, { question: "Rust 的所有权怎么工作？" });
-      const frames = await readStream(res);
-      const done = frames.find((f) => f.event === "done");
-      assert.ok(done);
-      const rec = asRecord(done.data);
-      assert.strictEqual(rec.found, false);
-      assert.strictEqual(rec.answer, null);
-
-      const { readAsks } = await import("./qa/asks.js");
-      const asks = await readAsks();
-      assert.strictEqual(asks.length, 1);
-      assert.strictEqual(asks[0]?.found, false);
-      assert.strictEqual(rec.outcome, "not_found", "模型明说 none —— 这才是真的收录信号");
-    });
-  });
-
-  test("编造引用：没读任何原文就作答 → aborted，且**不得**写进提问记录", async () => {
-    const replies = [
-      JSON.stringify({ kind: "search", query: "防抖" }),
-      // 没有 read 过任何材料就直接作答，并引用 MAT_B
-      JSON.stringify({ kind: "answer", text: "防抖是延迟执行。", cites: [MAT_B] }),
-    ];
-    await withServer(replies, async (port) => {
-      const res = await post(port, { question: "防抖是什么？" });
-      const frames = await readStream(res);
-      const done = frames.find((f) => f.event === "done");
-      assert.ok(done);
-      const rec = asRecord(done.data);
-      assert.strictEqual(rec.answer, null, "没读过就引用，必须被剔成空并降级");
-      assert.strictEqual(rec.found, false);
-      assert.deepStrictEqual(rec.cites, []);
-      // 它说明的是**模型没干活**，不是「库里缺东西」——所以不算收录信号
-      assert.strictEqual(rec.outcome, "aborted");
-
-      const { readAsks } = await import("./qa/asks.js");
-      assert.deepStrictEqual(await readAsks(), [], "aborted 不该在 asks.jsonl 里留下任何行");
-    });
+        const { readAsks } = await import("./qa/asks.js");
+        const asks = await readAsks();
+        assert.deepStrictEqual(asks[0]?.queries, ["缓冲", "流式响应"], "两个检索词都要记进提问记录");
+      },
+    );
   });
 });

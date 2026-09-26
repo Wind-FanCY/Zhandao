@@ -168,7 +168,7 @@ export function renderToolResult(action: Action, result: unknown): string {
 
 function renderSearchResult(result: unknown): string {
   if (!Array.isArray(result) || result.length === 0) {
-    return "没有搜到任何材料，换个检索词试试，或者直接 none。";
+    return "没有搜到任何材料，换个检索词试试；确实找不到就直接说明库里没有，别硬凑。";
   }
 
   const lines = result.map((item, i) => {

@@ -100,6 +100,11 @@ export async function runAskNative(
   // 模型自己声明的引用（原生答案没有 cites 字段可供声明），见文件头「新出现的代码」。
   const readMaterialIds = new Set<string>();
 
+  // **「它到底有没有去找过」的凭证。** 与 `readMaterialIds` 是两回事：
+  // 那个只认 `read`，这个认任何一次成功发出的工具调用（search / outline 也算找）。
+  // 它决定「纯文本零引用」这个终态是 not_found（找过了，收录信号）还是 aborted（没找，不留记录）。
+  let usedAnyTool = false;
+
   for (let round = 1; round <= maxRounds; round++) {
     // 最后一轮先告诉模型工具没了，理由与 qa/loop.ts 完全一样（那是实测逼出来的：
     // BM25 永远会返回候选，模型不会主动意识到"库里没有"，需要明确提醒它工具预算用完了）。
@@ -118,8 +123,17 @@ export async function runAskNative(
     const turn = await deps.askOnceNative(messages, TOOL_SCHEMAS);
 
     if (turn.toolCalls.length === 0) {
-      // 没有工具调用、有文本内容——这就是终态，原生协议不区分"answer"和"none"两种
-      // 终态动作：cites 为空即等价于手搓协议里的 none/引用全部作废降级。
+      // 没有工具调用、有文本内容——这就是终态。
+      // **原生协议没有 `none` 这个动作**，「库里没有」和「我直接答了」长得一模一样，
+      // 都是"纯文本 + 零引用"。但这两者指向相反的动作，**不能合并**：
+      //
+      //   从没调过任何工具就给文本   → 拿通用知识蒙的，**与库无关** → aborted，不落盘
+      //   搜过/看过目录但没值得读的 → **它确实去找了**，这是真的收录信号 → not_found
+      //
+      // 判据用的是 `usedAnyTool` 而不是 `readMaterialIds`：**`read` 不是「找」，
+      // `search` 才是**。只看有没有 read 过，会把「找遍了确实没有」误判成「模型没干活」，
+      // 于是 `asks.jsonl` 里的收录信号在原生路径上会整个消失——
+      // 而那是 `found:false` 那些行存在的全部理由（CLAUDE.md）。
       const cites = Array.from(readMaterialIds);
       const text = turn.content ?? "";
 
@@ -129,14 +143,23 @@ export async function runAskNative(
         resultSummary:
           cites.length > 0
             ? `给出答案，引用 ${cites.length} 篇已读材料`
-            : "给出答案，但循环中没有真正 read 过任何材料——整体降级为「库里没有」",
+            : usedAnyTool
+              ? "找过了但没读到可引用的原文——判为「库里没有」"
+              : "一个工具都没调就给了文本——判为「这次没问成」，不留记录",
       };
       steps.push(step);
       deps.onStep?.(step);
 
       if (cites.length === 0) {
-        // 一篇原文都没读就给文本答案 —— 模型没干活，不是库里缺东西（见 loop.ts 的 AskOutcome）
-        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false, outcome: "aborted" };
+        return {
+          question,
+          steps,
+          answer: null,
+          cites: [],
+          rounds: round,
+          hitLimit: false,
+          outcome: usedAnyTool ? "not_found" : "aborted",
+        };
       }
       return { question, steps, answer: text, cites, rounds: round, hitLimit: false, outcome: "answered" };
     }
@@ -144,6 +167,8 @@ export async function runAskNative(
     // 有工具调用：**必须先把这一整轮的 assistant 消息（可能带多个并行 tool_calls）
     // 拼回历史，再给每一个 tool_call 各自执行、各自回一条 role:"tool" 消息**——
     // 少回一条 API 就 400，这是与手搓协议行为差异最大的一处（见文件头）。
+    usedAnyTool = true;
+
     messages.push({
       role: "assistant",
       content: turn.content,
