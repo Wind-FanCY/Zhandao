@@ -28,15 +28,39 @@ export interface Step {
   resultSummary: string;
 }
 
+/**
+ * 一次**提问**的结局。**`answer: null` 曾经把四种成因压成一种，那是个会留下永久伤害的 bug。**
+ *
+ * 因为 `answer === null` 一路走到 `app.ts` 会变成 `found: false` 写进 `data/asks.jsonl`，
+ * 而 `found:false` 在本项目里有明确含义——**它是收录信号**（CLAUDE.md：告诉本人该去收什么）。
+ * 于是「模型连着两次没把 json 吐对」会被记成「库里没有这个」，
+ * 而本人两周后翻记录时会据此去收一篇**库里其实已有**的材料。
+ *
+ * 这与步骤流里 `none` / `protocol_error` 的混淆是同一个病：
+ * **一个关于「库」的事实和一个关于「模型输出」的事实共用了一个出口。**
+ * 区别是那一处显示错了刷新就没了，这一处写进的是**不可再生**的 `asks.jsonl`。
+ *
+ * **判据**：这个结局能不能当成「库里缺东西」的证据？
+ * 不能的，一律 `aborted`，不留记录——**没有记录好过一条假记录**。
+ */
+export type AskOutcome =
+  /** 有答案，且引用全部经过完整性校验 */
+  | "answered"
+  /** 库里没有：模型明说 none，或搜到触顶仍无所获。**只有这一种算收录信号** */
+  | "not_found"
+  /** 这次没问成：模型没按格式说话、或没读任何原文就作答。**与库无关，不写 asks.jsonl** */
+  | "aborted";
+
 export interface AskResult {
   question: string;
   steps: Step[];
-  /** null = 库里没有（含"none 动作""触顶""连续协议错误放弃""引用全部作废降级"四种成因） */
+  /** null 时看 `outcome` 区分是「库里没有」还是「这次没问成」 */
   answer: string | null;
   /** 材料 id，已通过引用完整性校验——每一个都真的被 toolRead 成功读过 */
   cites: string[];
   rounds: number;
   hitLimit: boolean;
+  outcome: AskOutcome;
 }
 
 export interface AskDeps {
@@ -117,9 +141,10 @@ export async function runAsk(
       deps.onStep?.(step);
 
       if (consecutiveProtocolErrors >= MAX_CONSECUTIVE_PROTOCOL_ERRORS) {
-        // 连续两次都解析不出合法动作——不再给机会，直接降级为"库里没有"，
-        // 而不是把 maxRounds 剩下的轮次全耗在"再试一次"上
-        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false };
+        // 连续两次都解析不出合法动作——不再给机会，而不是把剩下的轮次全耗在"再试一次"上。
+        // **这里是 aborted 不是 not_found**：模型没按格式说话，这件事完全不提供
+        // 「库里有没有」的任何信息，记成收录信号就是在造假证据。
+        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false, outcome: "aborted" };
       }
 
       messages.push({ role: "assistant", content: raw });
@@ -147,18 +172,20 @@ export async function runAsk(
       steps.push(step);
       deps.onStep?.(step);
 
-      // 过滤后为空——等同"库里没有"，不能让一个查无实据的答案漏出去
+      // 过滤后为空——不能让一个查无实据的答案漏出去。
+      // **同样是 aborted**：模型一篇原文都没读就作答，说明的是**模型没干活**，
+      // 不是「库里缺东西」——它根本没去找过。
       if (validCites.length === 0) {
-        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false };
+        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false, outcome: "aborted" };
       }
-      return { question, steps, answer: action.text, cites: validCites, rounds: round, hitLimit: false };
+      return { question, steps, answer: action.text, cites: validCites, rounds: round, hitLimit: false, outcome: "answered" };
     }
 
     if (action.kind === "none") {
       const step: Step = { round, action, resultSummary: `库里没有：${action.reason}` };
       steps.push(step);
       deps.onStep?.(step);
-      return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false };
+      return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false, outcome: "not_found" };
     }
 
     // 剩下三种是工具动作：search / outline / read——真正执行，把结果拼回对话历史
@@ -188,5 +215,7 @@ export async function runAsk(
   // 循环跑完 maxRounds 轮仍未得到 answer/none——触顶，降级为"库里没有"。
   // 触顶不是失败，是合法终态：CLAUDE.md「三条不可违反的性质」第 2 条明确要求
   // "循环触顶（hitLimit）也降级为 answer: null"。
-  return { question, steps, answer: null, cites: [], rounds: maxRounds, hitLimit: true };
+  // 触顶算 **not_found**：模型确实搜了满 maxRounds 轮仍无所获，这是关于库的弱证据。
+  // 与 aborted 的分界是「它到底有没有去找过」。
+  return { question, steps, answer: null, cites: [], rounds: maxRounds, hitLimit: true, outcome: "not_found" };
 }

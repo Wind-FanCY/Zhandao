@@ -28,12 +28,20 @@ interface AskCite {
   title: string;
 }
 
+/**
+ * `outcome` 把「库里没有」和「这次没问成」分开，两者指向**相反的动作**：
+ * 前者该去收录一篇，后者该重问一次。服务端也据此决定写不写提问记录。
+ * **老服务端不发这个字段**，所以它是可选的，缺省按 found 推断。
+ */
+type AskOutcome = "answered" | "not_found" | "aborted";
+
 interface AskDonePayload {
   answer: string | null;
   cites: AskCite[];
   rounds: number;
   hitLimit: boolean;
   found: boolean;
+  outcome?: AskOutcome;
 }
 
 interface AskErrorPayload {
@@ -69,6 +77,9 @@ function isAskDonePayload(v: unknown): v is AskDonePayload {
   if (typeof v.rounds !== "number") return false;
   if (typeof v.hitLimit !== "boolean") return false;
   if (typeof v.found !== "boolean") return false;
+  if (v.outcome !== undefined && v.outcome !== "answered" && v.outcome !== "not_found" && v.outcome !== "aborted") {
+    return false;
+  }
   return true;
 }
 
@@ -202,6 +213,7 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
   const [hitLimit, setHitLimit] = useState(false);
   // null = 还没收到 done 事件（本轮还在跑，或者还没问过）
   const [found, setFound] = useState<boolean | null>(null);
+  const [outcome, setOutcome] = useState<AskOutcome | null>(null);
 
   const ask = useCallback(async (rawQuestion: string) => {
     const q = rawQuestion.trim();
@@ -215,6 +227,7 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
     setRounds(null);
     setHitLimit(false);
     setFound(null);
+    setOutcome(null);
 
     try {
       const res = await fetch(`${API}/api/ask`, {
@@ -254,6 +267,9 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
             setRounds(data.rounds);
             setHitLimit(data.hitLimit);
             setFound(data.found);
+            // 老服务端不发 outcome：按 found 回退推断，此时区分不出 aborted——
+            // 那是可接受的降级，不是错误。
+            setOutcome(data.outcome ?? (data.found ? "answered" : "not_found"));
             sawDone = true;
           }
         } else if (parsed.event === "error") {
@@ -293,9 +309,10 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
   const answerBody = useMemo(() => (answer === null ? null : renderBody(answer)), [answer]);
 
   const running = phase.kind === "running";
-  // "库里没有" 与 hitLimit 触顶都降级为同一个合法终态：`found === false`
-  // 或者 `answer === null`（契约允许调用方按任一个判断，这里两个都认）。
-  const notFound = found === false || (found === true && answer === null);
+  // **三个终态，不是两个。** 「库里没有」该去收录，「这次没问成」该重问一次——
+  // 把它们显示成同一个框，人就会据此去收一篇库里其实已有的材料。
+  const aborted = outcome === "aborted";
+  const notFound = !aborted && (found === false || answer === null);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
@@ -364,6 +381,25 @@ export function Ask({ onOpenMaterial }: { onOpenMaterial: (materialId: string) =
               <div style={{ marginTop: "6px", fontSize: "13px", color: "#8d6e63" }}>
                 这本身是有价值的结果——去「过闸」收一篇（<code>Ctrl+D</code> 进
                 「Zhandao待收录」），下次问同一个问题就有答案了。
+              </div>
+            </div>
+          )}
+
+          {aborted && (
+            <div
+              style={{
+                padding: "12px 14px",
+                backgroundColor: "#eceff1",
+                border: "1px solid #cfd8dc",
+                borderRadius: "4px",
+                fontSize: "14px",
+                lineHeight: 1.8,
+                color: "#455a64",
+              }}
+            >
+              这次没问成——模型没按约定的格式作答，或者一篇原文都没读就下了结论。
+              <div style={{ marginTop: "6px", fontSize: "13px", color: "#607d8b" }}>
+                <strong>这不等于库里没有</strong>，所以没有记进提问记录。直接再问一次通常就好了。
               </div>
             </div>
           )}

@@ -135,9 +135,10 @@ export async function runAskNative(
       deps.onStep?.(step);
 
       if (cites.length === 0) {
-        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false };
+        // 一篇原文都没读就给文本答案 —— 模型没干活，不是库里缺东西（见 loop.ts 的 AskOutcome）
+        return { question, steps, answer: null, cites: [], rounds: round, hitLimit: false, outcome: "aborted" };
       }
-      return { question, steps, answer: text, cites, rounds: round, hitLimit: false };
+      return { question, steps, answer: text, cites, rounds: round, hitLimit: false, outcome: "answered" };
     }
 
     // 有工具调用：**必须先把这一整轮的 assistant 消息（可能带多个并行 tool_calls）
@@ -203,5 +204,5 @@ export async function runAskNative(
   }
 
   // 触顶——与 qa/loop.ts 同一条规则：不是失败，是合法终态。
-  return { question, steps, answer: null, cites: [], rounds: maxRounds, hitLimit: true };
+  return { question, steps, answer: null, cites: [], rounds: maxRounds, hitLimit: true, outcome: "not_found" };
 }

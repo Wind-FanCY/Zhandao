@@ -1414,6 +1414,29 @@ describe("POST /api/ask", () => {
     });
   });
 
+  test("连续协议错误 → aborted，绝不能写成「库里没有」污染收录信号", async () => {
+    // 模型一直吐垃圾。修之前这会走到 answer:null → found:false → 写进 asks.jsonl，
+    // 于是一条「模型嘴瓢」被永久记成「库里缺这个」，而 asks.jsonl 不可再生。
+    await withServer(["这不是 json", "还不是 json", "依然不是"], async (port) => {
+      const res = await post(port, { question: "库里其实有答案的某个问题" });
+      const frames = await readStream(res);
+      const done = frames.find((f) => f.event === "done");
+      assert.ok(done);
+      const rec = asRecord(done.data);
+      assert.strictEqual(rec.outcome, "aborted", "协议错误放弃必须是 aborted");
+      assert.strictEqual(rec.found, false);
+
+      const { readAsks } = await import("./qa/asks.js");
+      const asks = await readAsks();
+      assert.deepStrictEqual(asks, [], "这是假证据，一行都不该落盘");
+
+      // 步骤流里也必须标成 protocol_error 而不是 none
+      const kinds = frames.filter((f) => f.event === "step").map((f) => asRecord(f.data).kind);
+      assert.ok(kinds.includes("protocol_error"), `步骤流应含 protocol_error，实际 ${kinds.join(",")}`);
+      assert.ok(!kinds.includes("none"), "协议错误不得显示成「库里没有」");
+    });
+  });
+
   test("库里没有：found=false 且照样落盘——这类记录是收录信号，最不该被丢", async () => {
     await withServer([JSON.stringify({ kind: "none", reason: "库里没有 Rust 的内容" })], async (port) => {
       const res = await post(port, { question: "Rust 的所有权怎么工作？" });
@@ -1428,10 +1451,11 @@ describe("POST /api/ask", () => {
       const asks = await readAsks();
       assert.strictEqual(asks.length, 1);
       assert.strictEqual(asks[0]?.found, false);
+      assert.strictEqual(rec.outcome, "not_found", "模型明说 none —— 这才是真的收录信号");
     });
   });
 
-  test("编造引用：引用了没读过的材料，整体降级为「库里没有」", async () => {
+  test("编造引用：没读任何原文就作答 → aborted，且**不得**写进提问记录", async () => {
     const replies = [
       JSON.stringify({ kind: "search", query: "防抖" }),
       // 没有 read 过任何材料就直接作答，并引用 MAT_B
@@ -1446,6 +1470,11 @@ describe("POST /api/ask", () => {
       assert.strictEqual(rec.answer, null, "没读过就引用，必须被剔成空并降级");
       assert.strictEqual(rec.found, false);
       assert.deepStrictEqual(rec.cites, []);
+      // 它说明的是**模型没干活**，不是「库里缺东西」——所以不算收录信号
+      assert.strictEqual(rec.outcome, "aborted");
+
+      const { readAsks } = await import("./qa/asks.js");
+      assert.deepStrictEqual(await readAsks(), [], "aborted 不该在 asks.jsonl 里留下任何行");
     });
   });
 });

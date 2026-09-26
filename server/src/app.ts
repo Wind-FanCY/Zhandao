@@ -1211,21 +1211,30 @@ export function createApp(
         if (step.action.kind === "search") queries.push(step.action.query);
       }
 
-      const found = result.answer !== null;
+      const found = result.outcome === "answered";
 
       // **提问记录**：只存问题、搜过的词、引用和「库里有没有」，不存答案正文（CLAUDE.md）。
-      // 落盘失败不该吞掉已经算出来的答案，所以单独 catch。
-      try {
-        await appendAsk({
-          question,
-          at: new Date().toISOString(),
-          queries,
-          cites: result.cites,
-          found,
-          rounds: result.rounds,
-        });
-      } catch (logErr) {
-        console.error("[ask] 提问记录落盘失败（答案照常返回）:", logErr);
+      //
+      // **`aborted` 不落盘**，这是有意的：`found:false` 在本项目里是**收录信号**，
+      // 而「模型没按格式说话」不提供关于库的任何信息。记下去就是造一条假证据，
+      // 而 `asks.jsonl` 是**不可再生**的——假证据会一直躺在那儿误导人。
+      // **没有记录好过一条假记录。**
+      if (result.outcome === "aborted") {
+        console.warn(`[ask] 本次未问成（outcome=aborted），不写提问记录：${question}`);
+      } else {
+        // 落盘失败不该吞掉已经算出来的答案，所以单独 catch。
+        try {
+          await appendAsk({
+            question,
+            at: new Date().toISOString(),
+            queries,
+            cites: result.cites,
+            found,
+            rounds: result.rounds,
+          });
+        } catch (logErr) {
+          console.error("[ask] 提问记录落盘失败（答案照常返回）:", logErr);
+        }
       }
 
       send("done", {
@@ -1237,6 +1246,8 @@ export function createApp(
         rounds: result.rounds,
         hitLimit: result.hitLimit,
         found,
+        // 界面必须能区分「库里没有」和「这次没问成」——前者该去收录，后者该重问一次
+        outcome: result.outcome,
       });
     } catch (err) {
       const message =
