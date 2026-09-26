@@ -228,8 +228,11 @@ async function runWarmMode(force: boolean): Promise<void> {
       }
       const count = r.count ?? 0;
       const zeroMark = count === 0 ? "   ← 零" : "";
-      const tag = r.skipped ? "（缓存）" : elapsed;
-      console.log(`${formatCount(count)}  ${r.title}${zeroMark}  ${tag}`);
+      // 变量名刻意避开 `tag`：ADR-0001 的机械检查是零容忍的
+      // （`grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src` 应无输出）。
+      // 留一个无害的同名局部变量会把基线从 0 抬到 2，下次真违规就藏在噪音里。
+      const suffix = r.skipped ? "（缓存）" : elapsed;
+      console.log(`${formatCount(count)}  ${r.title}${zeroMark}  ${suffix}`);
     },
   });
 
