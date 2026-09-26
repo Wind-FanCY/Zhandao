@@ -19,7 +19,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { pickForPush } from "../push/pool.js";
+import { resolveTodaysPush } from "../push/today.js";
 import { appendPush } from "../push/log.js";
 import { initializeRuntime } from "../runtime.js";
 import { alreadyShownToday, markShownToday } from "../push/shown.js";
@@ -61,10 +61,12 @@ async function main(): Promise<void> {
   // 打一行「今天已提示过」本身就是它要消掉的那种噪音。
   if (oncePerDay && (await alreadyShownToday())) return;
 
+  // 用 resolveTodaysPush 而不是 pickForPush：这样手动 `npm run push` 与今天
+  // hook 说的是同一篇——「今天该读哪篇」是一个事实，不是每次调用各算各的。
   // 与 pickForPush 共用同一个 now，让「挑出这一条」与「记这一条是什么时候推的」
   // 指向同一时刻，不留时间差。
   const now = new Date();
-  const candidate = await pickForPush(now);
+  const candidate = await resolveTodaysPush(now);
 
   if (!candidate) {
     // 「今天没有」是合法输出，但 hook 场景下也不该出声
@@ -85,9 +87,17 @@ async function main(): Promise<void> {
   //     return 了，根本走不到这里，不需要额外判断；
   //   - --dry-run 不影响：它只管发不发系统通知，hook 场景本来就带着 --dry-run，
   //     而正文已经进对话、本人确实看到了那行字。
+  //
+  // **这里不会出现「重放旧记录又写一条新记录」的情况**：走到这一行之前，
+  // 上面的 `resolveTodaysPush(now)` 必然是在“今天还没有记录”这个前提下算出
+  // `candidate` 的——因为 `--once-per-day` 时若今天已经推过，
+  // `alreadyShownToday()` 已经在函数开头 return 了；不带 `--once-per-day`
+  // 的手动查询根本不会走到这个 `if (oncePerDay)` 分支。所以 `resolveTodaysPush`
+  // 此刻必然走的是「今天没有定论 → pickForPush 计算」那条分支，
+  // 这次 `appendPush` 写下的正是那条计算结果，不是对旧记录的重复写入。
   async function recordPushIfShown(): Promise<void> {
     if (oncePerDay) {
-      await appendPush({ materialId: material.id, at: now.toISOString() });
+      await appendPush({ materialId: material.id, at: now.toISOString(), kind });
     }
   }
 

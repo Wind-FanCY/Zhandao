@@ -3,7 +3,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { appendPush, readLastPushTimes, type PushRecord } from "./log.js";
+import { appendPush, readLastPushTimes, readTodaysPush, type PushRecord } from "./log.js";
 
 let testDataDir: string;
 const originalDataDirEnv = process.env.ZHANDAO_DATA_DIR;
@@ -91,5 +91,55 @@ describe("push/log.ts", () => {
     assert.ok(times.has("mat-1"));
     assert.ok(times.has("mat-3"));
     assert.ok(!times.has("mat-2"));
+  });
+
+  test("readTodaysPush 在文件不存在时返回 null", async () => {
+    const record = await readTodaysPush(new Date("2026-09-26T12:00:00.000Z"));
+    assert.equal(record, null);
+  });
+
+  // 注：这里的 UTC 时间戳都刻意选在同一个 UTC 日历日内相互靠近（或分属明显不同
+  // 的 UTC 日历日），这样无论本地时区是什么，「今天」/「昨天」的判定都不会因为
+  // 时区换算而在午夜附近翻面——与 pool.test.ts 里同日去重那组测试同一手法。
+  test("readTodaysPush 今天推过 → 返回今天那条记录（材料 id 断言，不只判非空）", async () => {
+    await appendPush({ materialId: "mat-today", at: "2026-09-26T02:00:00.000Z", kind: "孤岛" });
+
+    const record = await readTodaysPush(new Date("2026-09-26T10:00:00.000Z"));
+    assert.ok(record);
+    assert.equal(record?.materialId, "mat-today");
+    assert.equal(record?.kind, "孤岛");
+  });
+
+  test("readTodaysPush 跨天：记录是昨天的，今天问返回 null", async () => {
+    await appendPush({ materialId: "mat-yesterday", at: "2026-09-24T12:00:00.000Z" });
+
+    const record = await readTodaysPush(new Date("2026-09-26T12:00:00.000Z"));
+    assert.equal(record, null);
+  });
+
+  test("readTodaysPush 同一天多条记录时取最新的一条", async () => {
+    await appendPush({ materialId: "mat-early", at: "2026-09-26T01:00:00.000Z" });
+    await appendPush({ materialId: "mat-late", at: "2026-09-26T09:00:00.000Z" });
+
+    const record = await readTodaysPush(new Date("2026-09-26T14:00:00.000Z"));
+    assert.equal(record?.materialId, "mat-late");
+  });
+
+  test("readTodaysPush：历史行没有 kind 字段时不被当成坏行丢弃，仍能返回它", async () => {
+    const pushesPath = resolve(testDataDir, "pushes.jsonl");
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(testDataDir, { recursive: true });
+
+    // 手写一行没有 kind 字段的记录，模拟这次改动之前写下的历史行
+    const legacyLine = JSON.stringify({
+      materialId: "mat-legacy",
+      at: "2026-09-26T05:00:00.000Z",
+    });
+    await writeFile(pushesPath, legacyLine + "\n", "utf-8");
+
+    const record = await readTodaysPush(new Date("2026-09-26T12:00:00.000Z"));
+    assert.ok(record);
+    assert.equal(record?.materialId, "mat-legacy");
+    assert.equal(record?.kind, undefined);
   });
 });

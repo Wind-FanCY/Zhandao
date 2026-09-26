@@ -16,7 +16,8 @@ import { distillQuery, QueryDistillFailed } from "./model/distill-query.js";
 import { MissingApiKey } from "./model/keywords.js";
 import { appendArchived } from "./materials/archive.js";
 import { dropMaterial, MaterialNotFound } from "./materials/drop.js";
-import { computePool, pickForPush } from "./push/pool.js";
+import { computePool } from "./push/pool.js";
+import { resolveTodaysPush } from "./push/today.js";
 import { listDrills } from "./drills/list.js";
 import { DrillExtractFailed } from "./model/extract-drills.js";
 import { appendDrillRecord, readDrillVerdicts } from "./drills/records.js";
@@ -534,10 +535,14 @@ export function createApp(
    * GET /api/push/today
    * 今天该推的那一篇材料（孤岛优先，其次留档最早）。
    * `candidate: null` 是合法结果——池子空了，或池首是今天刚留档的（同日去重）。
+   *
+   * **用 `resolveTodaysPush` 而不是 `pickForPush`**：今天如果已经被 hook 推过，
+   * 这里必须给出同一篇，不能因为轮转排序把它算成「已经推过、该轮到下一篇」了
+   * ——那正是 2026-09-26 修的那个 bug（详见 `push/today.ts` 顶部注释）。
    */
   app.get("/api/push/today", async (req: Request, res: Response) => {
     try {
-      const picked = await pickForPush();
+      const picked = await resolveTodaysPush();
       if (!picked) {
         return res.json({ candidate: null });
       }

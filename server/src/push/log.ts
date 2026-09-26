@@ -21,10 +21,17 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { resolveDataDir } from "../data-dir.js";
+import { localDateKey } from "./shown.js";
 
 export interface PushRecord {
   materialId: string;
   at: string; // ISO 8601
+  /**
+   * 那篇材料被推送时是**孤岛**还是**留档**。**必须可选**：
+   * `pushes.jsonl` 里已有历史行没有这个字段，读到它们时 `kind` 为 `undefined`
+   * 是合法的——不能因为缺这个新字段就把整行当坏行丢弃。
+   */
+  kind?: string;
 }
 
 function pushesPath(): string {
@@ -90,6 +97,55 @@ export async function readLastPushTimes(): Promise<Map<string, string>> {
 }
 
 /**
+ * 今天（本地日）最后一次推送的记录；今天还没推过返回 null。
+ *
+ * 「今天该读哪篇」是一个事实，不是一次重算——这条函数是那个事实的唯一来源。
+ * 本地日的判定复用 `shown.ts` 的 `localDateKey`，别另写一套时区处理：两处判断
+ * 「是不是同一天」必须用同一个口径，否则会出现「hook 认为是今天、这里认为不是」
+ * 的新分岔。
+ *
+ * 文件不存在时返回 null（今天当然没推过），坏行跳过；同一天有多条时取最新的一条
+ * （与 `readLastPushTimes` 同一原则：「上次状态」只有最新一次有意义）。
+ */
+export async function readTodaysPush(now: Date): Promise<PushRecord | null> {
+  let content: string;
+  try {
+    content = await readFile(pushesPath(), "utf-8");
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
+
+  const todayKey = localDateKey(now);
+  let latest: PushRecord | null = null;
+
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+
+    try {
+      const parsed: unknown = JSON.parse(line);
+      const record = extractPushRecord(parsed);
+      if (!record) continue;
+
+      // record.at 是 ISO 8601（UTC），用 new Date(...) 还原成 Date 对象后
+      // 再取本地日历日——与 pool.ts 的 isSameLocalDay 用的是同一种手法，
+      // 保证「今天」在整个推送链路里只有一个判定方式。
+      if (localDateKey(new Date(record.at)) !== todayKey) continue;
+
+      if (!latest || record.at > latest.at) {
+        latest = record;
+      }
+    } catch {
+      // 忽略解析错误的行
+    }
+  }
+
+  return latest;
+}
+
+/**
  * 从任意解析出的 JSON 值里取出一条 PushRecord。
  * 用类型守卫而非 `as` 断言收窄——坏行/形状不对的行返回 null 而不是让编译器假装它对。
  */
@@ -102,5 +158,9 @@ function extractPushRecord(value: unknown): PushRecord | null {
 
   if (materialId === undefined || at === undefined) return null;
 
-  return { materialId, at };
+  // kind 可选：历史行没有这个字段，`"kind" in value` 对它们为 false，
+  // kind 收窄为 undefined——这正是我们要的合法值，不是坏行信号。
+  const kind = "kind" in value && typeof value.kind === "string" ? value.kind : undefined;
+
+  return { materialId, at, kind };
 }
