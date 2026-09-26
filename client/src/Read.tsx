@@ -454,7 +454,22 @@ function MaterialListPanel({
   );
 }
 
-export function Read({ active }: { active: boolean }) {
+export function Read({
+  active,
+  jumpToMaterialId,
+  onJumpHandled,
+}: {
+  active: boolean;
+  /**
+   * 「问答」标签点了一条引用之后，要跳到这里打开的材料 id。这是 Root.tsx
+   * 唯一的标签页状态提升机制——问答与阅读之间没有别的现成跳转（DrillHome
+   * 也不和 Read 互跳），所以别自己发明路由，直接照抄这个模式。
+   * 缺省或 null 表示当前没有待处理的跳转请求。
+   */
+  jumpToMaterialId?: string | null;
+  /** Root 用它把 jumpToMaterialId 复位，避免同一个 id 被重复消费。 */
+  onJumpHandled?: () => void;
+}) {
   const [pool, setPool] = useState<PoolItem[] | null>(null);
   const [materials, setMaterials] = useState<Material[]>([]);
   const [annotations, setAnnotations] = useState<AnnotationListItem[]>([]);
@@ -524,6 +539,19 @@ export function Read({ active }: { active: boolean }) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  // 只依赖 jumpToMaterialId：这个效应只该在「问答」发来一个新的跳转请求时
+  // 跑一次，不该在 `open` 每次渲染换新引用时重跑（`open` 没有用 useCallback
+  // 包一层，本来就不是稳定引用）。跳转处理完立刻用 onJumpHandled 复位，
+  // 否则用户在阅读里手动切换到别的材料后，父组件的 jumpToMaterialId 还留着
+  // 旧值，下次切回问答再点同一条引用会因为「值没变」而不触发。
+  useEffect(() => {
+    if (jumpToMaterialId !== undefined && jumpToMaterialId !== null) {
+      void open(jumpToMaterialId);
+      onJumpHandled?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpToMaterialId]);
 
   const act = async (path: string, body?: unknown, label?: string) => {
     if (openId === null) return;

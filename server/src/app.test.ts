@@ -7,6 +7,15 @@ import type { Server } from "node:http";
 
 import { createApp } from "./app.js";
 
+/** 给 SSE 测试用的最小响应类型别名（node 的全局 Response） */
+type Response_ = Awaited<ReturnType<typeof fetch>>;
+
+/** 测试里也不用 `as` 断言收窄外部数据——这条规矩对测试同样成立 */
+function asRecord(v: unknown): Record<string, unknown> {
+  assert.ok(typeof v === "object" && v !== null, "期望一个对象");
+  return { ...v };
+}
+
 describe("Express App Routes", () => {
   let tempDir: string;
   let bookmarksFile: string;
@@ -1263,5 +1272,180 @@ describe("Drills routes (预练)", () => {
     const res = await fetch(`http://localhost:${port}/api/drills/status`);
     assert.strictEqual(res.status, 200);
     assert.strictEqual(extractCalls, 0);
+  });
+});
+
+/**
+ * POST /api/ask —— **提问**端点。
+ *
+ * 这里全部用注入的假模型，**绝不调真实 DeepSeek**（测试打网络是这个项目明令禁止的）。
+ * 假模型按调用次数依次吐出预设的协议 JSON，于是整条循环的路径可以被精确摆布。
+ */
+describe("POST /api/ask", () => {
+  let dataDir: string;
+  let bookmarksFile: string;
+  let tempDir: string;
+
+  const MAT_A = "01M2JD1TKE6C6Q1WQ3JY2ABAX0";
+  const MAT_B = "01M2JD1N0VFX9J3VS5D00GM26K";
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "zhandao-ask-"));
+    bookmarksFile = join(tempDir, "Bookmarks");
+    await writeFile(bookmarksFile, JSON.stringify({ roots: { bookmark_bar: { type: "folder", name: "书签栏", children: [] } } }));
+
+    dataDir = await mkdtemp(join(tmpdir(), "zhandao-ask-data-"));
+    process.env.ZHANDAO_DATA_DIR = dataDir;
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(dataDir, "materials"), { recursive: true });
+    await writeFile(
+      join(dataDir, "materials", "a.md"),
+      `---\nid: ${MAT_A}\ntitle: 压缩中间件\nsource: https://example.com/a\ncaptured: 2026-09-01T00:00:00.000Z\n---\n\n## 缓冲问题\n\n流式响应要关掉缓冲，否则 SSE 会攒到最后一起到。\n\n## 别的\n\n无关内容。\n`,
+    );
+    await writeFile(
+      join(dataDir, "materials", "b.md"),
+      `---\nid: ${MAT_B}\ntitle: 手撕代码篇\nsource: https://example.com/b\ncaptured: 2026-09-02T00:00:00.000Z\n---\n\n## 防抖\n\n防抖是延迟执行。\n`,
+    );
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+    delete process.env.ZHANDAO_DATA_DIR;
+  });
+
+  /** 把预设应答排成队列；超出队列长度就一直返回最后一条（防止循环跑飞时测试卡死） */
+  function scriptedModel(replies: string[]): () => Promise<string> {
+    let i = 0;
+    return async () => {
+      const r = replies[Math.min(i, replies.length - 1)];
+      i += 1;
+      return r ?? "";
+    };
+  }
+
+  interface Frame { event: string; data: unknown }
+
+  /** 读完整条 SSE 流，解析成帧数组。测试里流是有限的，读到底即可。 */
+  async function readStream(res: Response_): Promise<Frame[]> {
+    const text = await res.text();
+    const frames: Frame[] = [];
+    for (const raw of text.split("\n\n")) {
+      if (!raw.trim()) continue;
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of raw.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+      }
+      frames.push({ event, data: JSON.parse(dataLines.join("\n")) });
+    }
+    return frames;
+  }
+
+  async function withServer<T>(
+    replies: string[],
+    fn: (port: number) => Promise<T>,
+  ): Promise<T> {
+    const app = createApp(bookmarksFile, undefined, undefined, scriptedModel(replies));
+    const srv = await new Promise<any>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    try {
+      return await fn(srv.address().port);
+    } finally {
+      srv.close();
+    }
+  }
+
+  function post(port: number, body: unknown, headers: Record<string, string> = { "Content-Type": "application/json" }) {
+    return fetch(`http://localhost:${port}/api/ask`, {
+      method: "POST",
+      headers,
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  test("空问题 / 缺 Content-Type 都返回 400，且错误文案来自我们的守卫", async () => {
+    await withServer(["{}"], async (port) => {
+      const r1 = await post(port, { question: "   " });
+      assert.strictEqual(r1.status, 400);
+      const d1: unknown = await r1.json();
+      // 断言错误**文案**而不只是状态码：第一版曾因为 express.json() 的 strict 模式
+      // 返回 400 而"通过"，那个 400 根本不是我们的守卫发的。
+      assert.match(JSON.stringify(d1), /Missing or empty question/);
+
+      // 没有 Content-Type 时 express.json() 不解析，req.body 是 undefined
+      const r2 = await fetch(`http://localhost:${port}/api/ask`, { method: "POST", body: "whatever" });
+      assert.strictEqual(r2.status, 400);
+      assert.match(JSON.stringify(await r2.json()), /Missing or empty question/);
+    });
+  });
+
+  test("完整路径 search → outline → read → answer，引用带标题，提问记录落盘 found=true", async () => {
+    const replies = [
+      JSON.stringify({ kind: "search", query: "流式响应 缓冲" }),
+      JSON.stringify({ kind: "outline", materialId: MAT_A }),
+      JSON.stringify({ kind: "read", materialId: MAT_A, line: 7 }),
+      JSON.stringify({ kind: "answer", text: "要关掉缓冲。", cites: [MAT_A] }),
+    ];
+    await withServer(replies, async (port) => {
+      const res = await post(port, { question: "为什么 SSE 会攒到最后一起到？" });
+      assert.strictEqual(res.status, 200);
+      const frames = await readStream(res);
+
+      const steps = frames.filter((f) => f.event === "step");
+      assert.ok(steps.length >= 3, `应当看到至少 3 个步骤事件，实际 ${steps.length}`);
+
+      const done = frames.find((f) => f.event === "done");
+      assert.ok(done, "必须有 done 事件");
+      const rec = asRecord(done.data);
+      assert.strictEqual(rec.found, true);
+      assert.strictEqual(rec.answer, "要关掉缓冲。");
+      assert.deepStrictEqual(rec.cites, [{ materialId: MAT_A, title: "压缩中间件" }]);
+
+      const { readAsks } = await import("./qa/asks.js");
+      const asks = await readAsks();
+      assert.strictEqual(asks.length, 1);
+      assert.strictEqual(asks[0]?.found, true);
+      assert.deepStrictEqual(asks[0]?.queries, ["流式响应 缓冲"]);
+      // **答案正文不得落盘**——这是 CLAUDE.md 的硬约束，不是风格偏好
+      assert.ok(!JSON.stringify(asks[0]).includes("要关掉缓冲"), "提问记录里不该出现答案正文");
+    });
+  });
+
+  test("库里没有：found=false 且照样落盘——这类记录是收录信号，最不该被丢", async () => {
+    await withServer([JSON.stringify({ kind: "none", reason: "库里没有 Rust 的内容" })], async (port) => {
+      const res = await post(port, { question: "Rust 的所有权怎么工作？" });
+      const frames = await readStream(res);
+      const done = frames.find((f) => f.event === "done");
+      assert.ok(done);
+      const rec = asRecord(done.data);
+      assert.strictEqual(rec.found, false);
+      assert.strictEqual(rec.answer, null);
+
+      const { readAsks } = await import("./qa/asks.js");
+      const asks = await readAsks();
+      assert.strictEqual(asks.length, 1);
+      assert.strictEqual(asks[0]?.found, false);
+    });
+  });
+
+  test("编造引用：引用了没读过的材料，整体降级为「库里没有」", async () => {
+    const replies = [
+      JSON.stringify({ kind: "search", query: "防抖" }),
+      // 没有 read 过任何材料就直接作答，并引用 MAT_B
+      JSON.stringify({ kind: "answer", text: "防抖是延迟执行。", cites: [MAT_B] }),
+    ];
+    await withServer(replies, async (port) => {
+      const res = await post(port, { question: "防抖是什么？" });
+      const frames = await readStream(res);
+      const done = frames.find((f) => f.event === "done");
+      assert.ok(done);
+      const rec = asRecord(done.data);
+      assert.strictEqual(rec.answer, null, "没读过就引用，必须被剔成空并降级");
+      assert.strictEqual(rec.found, false);
+      assert.deepStrictEqual(rec.cites, []);
+    });
   });
 });

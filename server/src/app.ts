@@ -22,6 +22,10 @@ import { listDrills } from "./drills/list.js";
 import { DrillExtractFailed } from "./model/extract-drills.js";
 import { appendDrillRecord, readDrillVerdicts } from "./drills/records.js";
 import { readCachedDrills } from "./drills/cache.js";
+import { runAsk } from "./qa/loop.js";
+import { askOnce, AnswerCallFailed, type ChatMessage } from "./model/answer.js";
+import { appendAsk } from "./qa/asks.js";
+import { ProtocolError } from "./qa/protocol.js";
 
 /**
  * 声明一个最小接口来表示可能有 flush 方法的 Response。
@@ -138,6 +142,10 @@ export function createApp(
   extractDrillsFn?: (
     candidates: { line: number; text: string }[],
   ) => Promise<{ line: number; question: string }[]>,
+  // 第四个位置参数了，这个签名开始有味道——四个可选位置参数，调用方漏一个位置就静默错位。
+  // 没有现在改成 options 对象，是因为那要同时动 index.ts 与全部测试，属于独立改动；
+  // 再加第五个之前必须先改。
+  askOnceFn?: (messages: ChatMessage[]) => Promise<string>,
 ): Express {
 
   // 作业状态必须在 createApp 之内：原先是模块级的，于是所有 app 实例共享同一份，
@@ -1127,6 +1135,119 @@ export function createApp(
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       return res.status(500).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/ask —— **提问**：一条手写的 agent 循环，检索**材料**后给出带出处的答案。
+   *
+   * **流式直返，刻意不照抄 `/api/inbox/events` 那套 job 表**：那里需要 job 表是因为抓取是
+   * 后台作业、可能多方订阅、订阅者来得比结果晚；**这里请求本身就是订阅**，
+   * 建一张表只会多一处要清理的内存。
+   *
+   * SSE 事件三种：`step`（循环每一轮在做什么，**这是这个端点的主要价值，不是加载动画**）、
+   * `done`、`error`。`done` 之后立刻 `res.end()`。
+   *
+   * **注意错误处理的分界**：头发出去之后就不能再改状态码了，所以 body 校验必须在
+   * `writeHead` 之前；之后的任何失败只能作为 `error` 事件流出去。
+   */
+  app.post("/api/ask", async (req: Request, res: Response) => {
+    // 手写收窄读 body——HTTP 请求是第五处外部边界，不用 `as` 断言。
+    // 没有 Content-Type 时 express.json() 不解析，req.body 是 undefined，isRecord 挡住。
+    const body: unknown = req.body;
+    const question =
+      isRecord(body) && typeof body.question === "string" ? body.question.trim() : "";
+    if (!question) {
+      return res.status(400).json({ error: "Missing or empty question" });
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "http://localhost:5173",
+      "Access-Control-Allow-Credentials": "true",
+    });
+
+    const send = (event: string, data: unknown): void => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      // compression 中间件会缓冲，不 flush 的话步骤事件会攒到最后一起到——
+      // 那正好毁掉这个端点唯一的价值（看见循环在转）。
+      if (hasFlush(res)) res.flush();
+    };
+
+    try {
+      const index = await buildMaterialsIndex();
+      const result = await runAsk(question, {
+        ctx: { index },
+        askOnce: askOnceFn ?? askOnce,
+        onStep: (step) => {
+          const a = step.action;
+          // 判别联合按 kind 收窄取「细节」，不用 `as`
+          const detail =
+            a.kind === "search"
+              ? a.query
+              : a.kind === "outline"
+                ? (getMaterial(index, a.materialId)?.title ?? a.materialId)
+                : a.kind === "read"
+                  ? `${getMaterial(index, a.materialId)?.title ?? a.materialId} · L${a.line}`
+                  : a.kind === "none"
+                    ? a.reason
+                    : a.kind === "protocol_error"
+                      ? a.message
+                      : "";
+          send("step", {
+            round: step.round,
+            kind: a.kind,
+            detail,
+            summary: step.resultSummary,
+          });
+        },
+      });
+
+      // 循环实际搜过的词——判别联合里只有 search 有 query，用守卫收窄而非 filter + 断言
+      const queries: string[] = [];
+      for (const step of result.steps) {
+        if (step.action.kind === "search") queries.push(step.action.query);
+      }
+
+      const found = result.answer !== null;
+
+      // **提问记录**：只存问题、搜过的词、引用和「库里有没有」，不存答案正文（CLAUDE.md）。
+      // 落盘失败不该吞掉已经算出来的答案，所以单独 catch。
+      try {
+        await appendAsk({
+          question,
+          at: new Date().toISOString(),
+          queries,
+          cites: result.cites,
+          found,
+          rounds: result.rounds,
+        });
+      } catch (logErr) {
+        console.error("[ask] 提问记录落盘失败（答案照常返回）:", logErr);
+      }
+
+      send("done", {
+        answer: result.answer,
+        cites: result.cites.map((id) => ({
+          materialId: id,
+          title: getMaterial(index, id)?.title ?? id,
+        })),
+        rounds: result.rounds,
+        hitLimit: result.hitLimit,
+        found,
+      });
+    } catch (err) {
+      const message =
+        err instanceof AnswerCallFailed || err instanceof MissingApiKey || err instanceof ProtocolError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Unknown error";
+      send("error", { error: message });
+    } finally {
+      res.end();
     }
   });
 

@@ -3,8 +3,9 @@ import { App } from "./App.js";
 import { Attach } from "./Attach.js";
 import { Read } from "./Read.js";
 import { DrillHome } from "./DrillHome.js";
+import { Ask } from "./Ask.js";
 
-type View = "阅读" | "过闸" | "归属" | "预练";
+type View = "阅读" | "过闸" | "归属" | "预练" | "问答";
 
 /**
  * 顶层视图切换。
@@ -20,10 +21,19 @@ export function Root() {
   // 和**归属**（要先有速记）都是间歇性的。
   const [view, setView] = useState<View>("阅读");
   const [pending, setPending] = useState<number | null>(null);
+  // 「问答」里点一条引用要跳到「阅读」把那篇材料打开。这是这两个视图之间
+  // 唯一的耦合——没有为此另起一套路由，就是把「跳去哪」提升到共同的父组件，
+  // 由 Read 消费之后自己复位（见 Read.tsx 的 jumpToMaterialId 注释）。
+  const [jumpToMaterialId, setJumpToMaterialId] = useState<string | null>(null);
 
   // 必须 memo：Attach 的加载 effect 依赖这个回调，每次渲染换一个新函数会导致
   // 「回调变 → 重新拉取 → setState → 重新渲染」的死循环。
   const handlePendingCount = useCallback((n: number) => setPending(n), []);
+
+  const openInRead = useCallback((materialId: string) => {
+    setJumpToMaterialId(materialId);
+    setView("阅读");
+  }, []);
 
   const tab = (name: View, badge?: number | null) => (
     <button
@@ -68,6 +78,7 @@ export function Root() {
         {tab("过闸")}
         {tab("归属", pending)}
         {tab("预练")}
+        {tab("问答")}
       </div>
 
       {/* 「阅读」刻意不带数字徽标：待处理几十篇这个数字每天糊在眼前，
@@ -86,7 +97,11 @@ export function Root() {
           读一篇<strong>材料</strong>，然后走三个终态之一：写<strong>标注</strong>、
           <strong>留档</strong>（读完没什么可写）、或划掉。
         </p>
-        <Read active={view === "阅读"} />
+        <Read
+          active={view === "阅读"}
+          jumpToMaterialId={jumpToMaterialId}
+          onJumpHandled={() => setJumpToMaterialId(null)}
+        />
       </div>
 
       <div style={{ display: view === "过闸" ? "block" : "none", flex: 1, minHeight: 0, overflowY: "auto" }}>
@@ -107,6 +122,15 @@ export function Root() {
           <strong>练题</strong>逐道作答、自评会不会，不进推送池、不改<strong>孤岛</strong>判据。
         </p>
         <DrillHome active={view === "预练"} />
+      </div>
+      <div style={{ display: view === "问答" ? "block" : "none", padding: "0 20px", flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <h1 style={{ marginBottom: "6px" }}>Zhandao 问答</h1>
+        <p style={{ color: "#666", fontSize: "13px", marginBottom: "20px", lineHeight: 1.7 }}>
+          一条自己手写的 agent 循环：搜索 / 翻目录 / 读一节，只用库里已有的
+          <strong>材料</strong>作答，答不出就诚实说没有——「库里没有」是合法结果，
+          不是失败。
+        </p>
+        <Ask onOpenMaterial={openInRead} />
       </div>
     </div>
   );
