@@ -228,9 +228,10 @@ async function runWarmMode(force: boolean): Promise<void> {
       }
       const count = r.count ?? 0;
       const zeroMark = count === 0 ? "   ← 零" : "";
-      // 变量名刻意避开 `tag`：ADR-0001 的机械检查是零容忍的
-      // （`grep -rniE "\btag\b|\btopic\b|\bcategory\b|知识点" server/src` 应无输出）。
-      // 留一个无害的同名局部变量会把基线从 0 抬到 2，下次真违规就藏在噪音里。
+      // 变量名刻意避开 ADR-0001 那条机械检查里点名的几个词（见 CLAUDE.md「术语表要维护
+      // _Code_ 行」一节的 grep）。那条检查是零容忍的：留一个无害的同名局部变量，
+      // 基线就从 0 抬上去，下次真违规会藏在噪音里。
+      // 注释里也不要把那串正则原样抄过来——抄了它自己就会命中（实测踩过）。
       const suffix = r.skipped ? "（缓存）" : elapsed;
       console.log(`${formatCount(count)}  ${r.title}${zeroMark}  ${suffix}`);
     },
